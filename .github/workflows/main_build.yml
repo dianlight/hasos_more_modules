@@ -2,8 +2,8 @@ name: Build HAOS Kernel Modules
 
 on:
   # Run daily at 06:00 UTC to pick up new HAOS releases automatically.
-  schedule:
-    - cron: "0 6 * * *"
+  #schedule:
+  #  - cron: "0 6 * * *"
 
   # Allow manual triggering from the GitHub UI.
   workflow_dispatch:
@@ -127,16 +127,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Job 3 – Build kernel modules for every pending version × board.
-  #
-  # Strategy: bypass Buildroot entirely.  We fetch the exact kernel source
-  # tarball, reconstruct the merged .config using the same base config and
-  # fragment files that the defconfig references, then run:
-  #
-  #   make modules_prepare   – generates the headers / Module.symvers needed
-  #                            to compile out-of-tree (or in-tree) modules
-  #   make <mod>.ko          – compiles only the requested module
-  #
-  # This means we never have to build a full OS image or a Buildroot toolchain.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.version }} / ${{ matrix.board }}
@@ -152,9 +142,6 @@ jobs:
         board: ${{ fromJson(needs.detect-boards.outputs.boards) }}
 
     steps:
-      # -----------------------------------------------------------------------
-      # 1. Checkouts
-      # -----------------------------------------------------------------------
       - name: Checkout hasos_more_modules
         uses: actions/checkout@v4
 
@@ -166,13 +153,17 @@ jobs:
           path: operating-system
           fetch-depth: 1
 
-      # -----------------------------------------------------------------------
-      # 2. Parse the board defconfig – extract kernel version, base config,
-      #    config fragments, and architecture in a single shell step so that
-      #    every subsequent step can rely on well-defined env/output variables.
-      # -----------------------------------------------------------------------
-      - name: Parse defconfig for ${{ matrix.board }}
-        id: defconfig
+      # Buildroot needs a set of host packages.
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential cpio flex \
+            libelf-dev libncurses-dev libssl-dev \
+            python3 python3-jinja2 rsync unzip wget
+
+      - name: Locate kernel config for ${{ matrix.board }}
+        id: locate-config
         run: |
           DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
 
@@ -181,405 +172,110 @@ jobs:
             exit 1
           fi
 
-          # ── Kernel source ─────────────────────────────────────────────────
-          # Three mutually exclusive kernel source modes in Buildroot:
-          #   BR2_LINUX_KERNEL_CUSTOM_VERSION  → standard kernel.org tarball
-          #   BR2_LINUX_KERNEL_CUSTOM_TARBALL  → arbitrary tarball URL (e.g. RPi fork)
-          #   BR2_LINUX_KERNEL_LATEST_VERSION  → latest stable (not used by HAOS)
+          echo "Using defconfig: ${DEFCONFIG}"
 
-          if grep -q '^BR2_LINUX_KERNEL_CUSTOM_VERSION=y' "${DEFCONFIG}"; then
-            KERNEL_VERSION=$(grep '^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=' "${DEFCONFIG}" \
-              | cut -d'"' -f2)
-            KERNEL_SOURCE_TYPE="kernel_org"
-            KERNEL_TARBALL_URL=""
-            echo "[INFO] Kernel source: kernel.org ${KERNEL_VERSION}"
-
-          elif grep -q '^BR2_LINUX_KERNEL_CUSTOM_TARBALL=y' "${DEFCONFIG}"; then
-            KERNEL_TARBALL_URL=$(grep '^BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION=' "${DEFCONFIG}" \
-              | cut -d'"' -f2)
-            # Derive a human-readable version label from the URL basename,
-            # stripping the .tar.gz suffix (e.g. "stable_20250916").
-            TARBALL_BASE=$(basename "${KERNEL_TARBALL_URL}" .tar.gz)
-            KERNEL_VERSION="${TARBALL_BASE}"
-            KERNEL_SOURCE_TYPE="custom_tarball"
-            echo "[INFO] Kernel source: custom tarball ${KERNEL_TARBALL_URL}"
-
-          else
-            echo "[ERROR] Unknown kernel source type in ${DEFCONFIG}" \
-                 "(neither BR2_LINUX_KERNEL_CUSTOM_VERSION nor BR2_LINUX_KERNEL_CUSTOM_TARBALL)"
-            exit 1
-          fi
-
-          if [[ -z "${KERNEL_VERSION}" ]]; then
-            echo "[ERROR] Could not determine kernel version from ${DEFCONFIG}"
-            exit 1
-          fi
-
-          echo "kernel_version=${KERNEL_VERSION}"         >> "$GITHUB_OUTPUT"
-          echo "kernel_source_type=${KERNEL_SOURCE_TYPE}" >> "$GITHUB_OUTPUT"
-          echo "kernel_tarball_url=${KERNEL_TARBALL_URL}" >> "$GITHUB_OUTPUT"
-          echo "Kernel version label: ${KERNEL_VERSION}"
-
-          # ── Architecture ──────────────────────────────────────────────────
-          if grep -q '^BR2_x86_64=y' "${DEFCONFIG}"; then
-            ARCH="x86"
-            CROSS_COMPILE="x86_64-linux-gnu-"
-            ARCH_PKG="gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu"
-          elif grep -q '^BR2_aarch64=y' "${DEFCONFIG}"; then
-            ARCH="arm64"
-            CROSS_COMPILE="aarch64-linux-gnu-"
-            ARCH_PKG="gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu"
-          else
-            echo "[ERROR] Unknown architecture in ${DEFCONFIG}"
-            exit 1
-          fi
-
-          echo "arch=${ARCH}"                   >> "$GITHUB_OUTPUT"
-          echo "cross_compile=${CROSS_COMPILE}" >> "$GITHUB_OUTPUT"
-          echo "arch_pkg=${ARCH_PKG}"           >> "$GITHUB_OUTPUT"
-          echo "Architecture: ARCH=${ARCH}  CROSS_COMPILE=${CROSS_COMPILE}"
-
-          # ── Base kernel config ────────────────────────────────────────────
-          # A board uses either:
-          #   BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y  → arch default (e.g. defconfig)
-          #   BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y        → explicit full .config file
-          HAOS_EXT="operating-system/buildroot-external"
-
-          if grep -q '^BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y' "${DEFCONFIG}"; then
-            BASE_CONFIG=$(grep '^BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=' "${DEFCONFIG}" \
-              | cut -d'"' -f2 \
-              | sed "s|\$(BR2_EXTERNAL_HASSOS_PATH)|${HAOS_EXT}|g")
-
-            if [[ -z "${BASE_CONFIG}" || ! -f "${BASE_CONFIG}" ]]; then
-              echo "[ERROR] Custom base config not found: ${BASE_CONFIG}"
-              exit 1
-            fi
-
-            echo "base_config_type=custom"    >> "$GITHUB_OUTPUT"
-            echo "base_config=${BASE_CONFIG}" >> "$GITHUB_OUTPUT"
-            echo "base_config_defconfig="     >> "$GITHUB_OUTPUT"
-            echo "Base config (custom): ${BASE_CONFIG}"
-
-          elif grep -q '^BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y' "${DEFCONFIG}"; then
-            # Use the kernel's built-in arch default (e.g. "make arm64_defconfig").
-            echo "base_config_type=arch_default" >> "$GITHUB_OUTPUT"
-            echo "base_config="                  >> "$GITHUB_OUTPUT"
-            echo "base_config_defconfig="        >> "$GITHUB_OUTPUT"
-            echo "Base config: arch default (defconfig)"
-
-          else
-            # BR2_LINUX_KERNEL_DEFCONFIG – a named defconfig shipped with the
-            # kernel source (e.g. "bcm2711" → "make bcm2711_defconfig").
-            NAMED_DEFCONFIG=$(grep '^BR2_LINUX_KERNEL_DEFCONFIG=' "${DEFCONFIG}" \
-              | cut -d'"' -f2)
-            if [[ -z "${NAMED_DEFCONFIG}" ]]; then
-              echo "[ERROR] Could not determine base kernel config from ${DEFCONFIG}"
-              exit 1
-            fi
-            echo "base_config_type=named_defconfig"           >> "$GITHUB_OUTPUT"
-            echo "base_config="                               >> "$GITHUB_OUTPUT"
-            echo "base_config_defconfig=${NAMED_DEFCONFIG}"   >> "$GITHUB_OUTPUT"
-            echo "Base config: named defconfig (make ${NAMED_DEFCONFIG}_defconfig)"
-          fi
-
-          # ── Config fragment files ─────────────────────────────────────────
-          FRAGMENTS_RAW=$(grep '^BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=' "${DEFCONFIG}" \
-            | cut -d'"' -f2 \
-            | sed "s|\$(BR2_EXTERNAL_HASSOS_PATH)|${HAOS_EXT}|g" \
+          # The board-specific kernel fragment is the last kernel.config entry
+          # listed in BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES.
+          # Resolve $(BR2_EXTERNAL_HASSOS_PATH) to the checkout path.
+          KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES' "${DEFCONFIG}" \
+            | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^" ]+kernel\.config' \
+            | tail -1 \
+            | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
             || true)
 
-          # Newline-separated list of fragment paths (may be empty).
-          FRAGMENTS=$(echo "${FRAGMENTS_RAW}" | tr ' ' '\n' | grep -v '^$' || true)
-
-          # Verify every fragment exists on disk.
-          MISSING=0
-          while IFS= read -r frag; do
-            [[ -z "${frag}" ]] && continue
-            if [[ ! -f "${frag}" ]]; then
-              echo "[WARN] Config fragment not found on disk: ${frag}"
-              MISSING=$((MISSING + 1))
-            fi
-          done <<< "${FRAGMENTS}"
-
-          if [[ ${MISSING} -gt 0 ]]; then
-            echo "[ERROR] ${MISSING} config fragment(s) missing – cannot produce a correct .config"
+          if [[ -z "${KERNEL_CONFIG}" ]]; then
+            echo "[ERROR] Could not find a kernel config fragment in ${DEFCONFIG}"
             exit 1
           fi
 
-          # Store as a space-separated single-line value for the next step.
-          FRAGMENTS_INLINE=$(echo "${FRAGMENTS}" | tr '\n' ' ' | sed 's/ $//')
-          echo "fragments=${FRAGMENTS_INLINE}" >> "$GITHUB_OUTPUT"
-          echo "Config fragments: ${FRAGMENTS_INLINE}"
+          if [[ ! -f "${KERNEL_CONFIG}" ]]; then
+            echo "[ERROR] Kernel config fragment not found on disk: ${KERNEL_CONFIG}"
+            exit 1
+          fi
 
-      # -----------------------------------------------------------------------
-      # 3. Install host build dependencies
-      # -----------------------------------------------------------------------
-      - name: Install host build dependencies
+          echo "config=${KERNEL_CONFIG}" >> "$GITHUB_OUTPUT"
+          echo "defconfig=${{ matrix.board }}_defconfig" >> "$GITHUB_OUTPUT"
+          echo "Found kernel config: ${KERNEL_CONFIG}"
+
+      - name: Detect architecture from defconfig
+        id: arch
         run: |
-          sudo apt-get update -qq
+          DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
+
+          if grep -q '^BR2_x86_64=y' "${DEFCONFIG}"; then
+            echo "ARCH=x86"                         >> "$GITHUB_OUTPUT"
+            echo "CROSS_COMPILE=x86_64-linux-gnu-"  >> "$GITHUB_OUTPUT"
+            echo "arch_pkg=gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu" >> "$GITHUB_OUTPUT"
+          elif grep -q '^BR2_aarch64=y' "${DEFCONFIG}"; then
+            echo "ARCH=arm64"                        >> "$GITHUB_OUTPUT"
+            echo "CROSS_COMPILE=aarch64-linux-gnu-"  >> "$GITHUB_OUTPUT"
+            echo "arch_pkg=gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu" >> "$GITHUB_OUTPUT"
+          else
+            echo "[ERROR] Unknown architecture in ${{ matrix.board }}_defconfig"
+            exit 1
+          fi
+
+      - name: Install cross-compilation toolchain
+        run: |
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential cpio flex \
-            libelf-dev libncurses-dev libssl-dev \
-            python3 python3-jinja2 rsync unzip wget \
-            ${{ steps.defconfig.outputs.arch_pkg }}
+            ${{ steps.arch.outputs.arch_pkg }}
 
-      # -----------------------------------------------------------------------
-      # 4. Download the exact kernel source tarball from kernel.org
-      # -----------------------------------------------------------------------
-      - name: Download Linux ${{ steps.defconfig.outputs.kernel_version }} source
+      - name: Patch kernel config fragment
         run: |
-          KERNEL_SOURCE_TYPE="${{ steps.defconfig.outputs.kernel_source_type }}"
-          KERNEL_VERSION="${{ steps.defconfig.outputs.kernel_version }}"
-          KERNEL_TARBALL_URL="${{ steps.defconfig.outputs.kernel_tarball_url }}"
+          bash scripts/patch_config.sh \
+            "${{ steps.locate-config.outputs.config }}" \
+            "${{ matrix.board }}"
 
-          if [[ "${KERNEL_SOURCE_TYPE}" == "kernel_org" ]]; then
-            # Standard kernel.org tarball.
-            # Layout: /pub/linux/kernel/v<MAJOR>.x/linux-<VERSION>.tar.xz
-            MAJOR=$(echo "${KERNEL_VERSION}" | cut -d. -f1)
-            TARBALL="linux-${KERNEL_VERSION}.tar.xz"
-            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
-            echo "Downloading ${URL} ..."
-            wget -q --show-progress --tries=3 --timeout=120 "${URL}" -O "${TARBALL}"
-            echo "Extracting ..."
-            tar -xf "${TARBALL}"
-            mv "linux-${KERNEL_VERSION}" linux-src
-            rm "${TARBALL}"
-
-          else
-            # Custom tarball (e.g. Raspberry Pi Linux fork on GitHub).
-            # The tarball URL points to a GitHub archive; when extracted the
-            # top-level directory is named  linux-<branch/tag>.
-            TARBALL="linux-custom.tar.gz"
-            echo "Downloading ${KERNEL_TARBALL_URL} ..."
-            wget -q --show-progress --tries=3 --timeout=300 \
-              "${KERNEL_TARBALL_URL}" -O "${TARBALL}"
-            echo "Extracting ..."
-            tar -xf "${TARBALL}"
-            # The extracted directory name varies; find the first linux-* dir.
-            EXTRACTED=$(find . -maxdepth 1 -type d -name 'linux-*' | head -1)
-            if [[ -z "${EXTRACTED}" ]]; then
-              echo "[ERROR] Could not find extracted linux source directory"
-              exit 1
-            fi
-            mv "${EXTRACTED}" linux-src
-            rm "${TARBALL}"
-          fi
-
-          echo "Kernel source ready at linux-src/"
-
-      # -----------------------------------------------------------------------
-      # 5. Produce the merged .config
-      #
-      #    Mirrors exactly what Buildroot does:
-      #      a) Start from the base config (copy custom config, or run
-      #         "make <arch>_defconfig" for the arch-default variant).
-      #      b) Merge every fragment with scripts/kconfig/merge_config.sh.
-      #      c) Apply our module patches via patch_config.sh.
-      # -----------------------------------------------------------------------
-      - name: Assemble kernel .config for ${{ matrix.board }}
+      - name: Configure and build Linux kernel modules
         env:
-          ARCH: ${{ steps.defconfig.outputs.arch }}
-          CROSS_COMPILE: ${{ steps.defconfig.outputs.cross_compile }}
+          ARCH: ${{ steps.arch.outputs.ARCH }}
+          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
         run: |
-          BASE_CONFIG_TYPE="${{ steps.defconfig.outputs.base_config_type }}"
-          BASE_CONFIG="${{ steps.defconfig.outputs.base_config }}"
-          FRAGMENTS="${{ steps.defconfig.outputs.fragments }}"
-          # Resolve base_config path relative to workspace root (one level up
-          # from linux-src where we cd into below).
+          cd operating-system
 
-          cd linux-src
+          # Apply the board defconfig so Buildroot knows what to build.
+          make BR2_EXTERNAL=buildroot-external \
+               "${{ steps.locate-config.outputs.defconfig }}" \
+               2>&1 | tail -20
 
-          # ── Step a: base config ───────────────────────────────────────────
-          BASE_CONFIG_DEFCONFIG="${{ steps.defconfig.outputs.base_config_defconfig }}"
+          # Configure the kernel (merges all config fragments including the
+          # patched board-specific one).
+          make linux-configure 2>&1 | tail -40
 
-          if [[ "${BASE_CONFIG_TYPE}" == "custom" ]]; then
-            echo "[INFO] Copying custom base config: ${BASE_CONFIG}"
-            cp "../${BASE_CONFIG}" .config
-            # Silently update .config to account for any new symbols in this
-            # exact kernel version without interactive prompts.
-            make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-              olddefconfig
+          # Build only the kernel modules – no full OS image.
+          make linux-modules 2>&1 | tail -80
 
-          elif [[ "${BASE_CONFIG_TYPE}" == "named_defconfig" ]]; then
-            echo "[INFO] Generating named defconfig: make ${BASE_CONFIG_DEFCONFIG}_defconfig"
-            make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-              "${BASE_CONFIG_DEFCONFIG}_defconfig"
-
-          else
-            echo "[INFO] Generating arch default config (make defconfig)"
-            make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-              defconfig
-          fi
-
-          # ── Step b: merge config fragments ───────────────────────────────
-          if [[ -n "${FRAGMENTS}" ]]; then
-            echo "[INFO] Merging config fragments: ${FRAGMENTS}"
-            # merge_config.sh -m = merge without overwriting .config in place;
-            # result goes to .config.  The -n flag suppresses prompts.
-            # We need to pass absolute paths so the relative cd doesn't matter.
-            FRAGMENT_ABS=""
-            for frag in ${FRAGMENTS}; do
-              FRAGMENT_ABS="${FRAGMENT_ABS} $(realpath ../${frag})"
-            done
-
-            # merge_config.sh is part of the kernel source tree.
-            ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-              scripts/kconfig/merge_config.sh -m .config ${FRAGMENT_ABS}
-            # Resolve any new symbols introduced by the fragments.
-            make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-              olddefconfig
-          fi
-
-          echo "[INFO] Base .config assembled."
-          cd ..
-
-          # ── Step c: apply our module patches ─────────────────────────────
-          echo "[INFO] Patching .config to enable modules as =m ..."
-          bash scripts/patch_config.sh linux-src/.config "${{ matrix.board }}"
-
-          # Re-run olddefconfig so the kernel resolves any symbol dependencies
-          # created by our patches (e.g. CONFIG_EXPORTFS=m requires
-          # CONFIG_MODULES=y which in turn may pull in other symbols).
-          cd linux-src
-          make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-            olddefconfig
-          cd ..
-
-          echo "[INFO] Final .config ready."
-
-      # -----------------------------------------------------------------------
-      # 6. Prepare the kernel tree (generates headers + Module.symvers)
-      #    This is equivalent to "make modules_prepare" – it does everything
-      #    needed to compile modules without actually building the full kernel
-      #    image or all in-tree modules.
-      # -----------------------------------------------------------------------
-      - name: Prepare kernel tree (modules_prepare)
-        env:
-          ARCH: ${{ steps.defconfig.outputs.arch }}
-          CROSS_COMPILE: ${{ steps.defconfig.outputs.cross_compile }}
-        run: |
-          cd linux-src
-          echo "[INFO] Running make modules_prepare ..."
-          # modules_prepare sets up headers, auto-generated files, and the
-          # scripts/mod/modpost binary – everything needed to compile modules.
-          # It does NOT produce Module.symvers; that is generated during the
-          # actual module build pass with KBUILD_MODPOST_WARN=1 below.
-          make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-            modules_prepare 2>&1
-          echo "[INFO] modules_prepare done."
-
-      # -----------------------------------------------------------------------
-      # 7. Build individual kernel modules
-      #
-      #    We compile each module by name directly inside the kernel source
-      #    tree.  The modules are in-tree (xfs, nfsd, nfs, exportfs), so we
-      #    use the standard kernel Makefile via:
-      #
-      #       make M=<subdir> <module>.ko
-      #
-      #    or, for modules with multiple C files, just build all .ko in that
-      #    subdirectory:
-      #
-      #       make M=<subdir> modules
-      # -----------------------------------------------------------------------
-      - name: Build kernel modules
-        id: build-modules
-        env:
-          ARCH: ${{ steps.defconfig.outputs.arch }}
-          CROSS_COMPILE: ${{ steps.defconfig.outputs.cross_compile }}
-        run: |
-          cd linux-src
-
-          # ── Generate Module.symvers ───────────────────────────────────────
-          # modules_prepare alone does NOT produce Module.symvers; modpost
-          # needs it to resolve inter-module symbol dependencies.  The
-          # correct minimal approach is to build all in-tree modules for
-          # only the subdirectories we care about in a single make invocation,
-          # which causes modpost to run once over all of them together and
-          # produce Module.symvers.  We pass KBUILD_MODPOST_WARN=1 so that
-          # any remaining unresolved symbols from other kernel subsystems
-          # become warnings rather than hard errors.
-
-          SUBDIRS="fs/exportfs fs/xfs fs/nfs fs/nfsd"
-
-          # Filter to only subdirs that actually exist in this kernel tree.
-          EXISTING_SUBDIRS=""
-          for s in ${SUBDIRS}; do
-            if [[ -d "${s}" ]]; then
-              EXISTING_SUBDIRS="${EXISTING_SUBDIRS} ${s}"
-            else
-              echo "[WARN] Subdir not found, skipping: ${s}"
-            fi
-          done
-
-          if [[ -z "${EXISTING_SUBDIRS}" ]]; then
-            echo "[ERROR] None of the target module subdirectories exist in this kernel tree."
+          # Record the kernel source directory for the extraction step.
+          LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" | head -1)
+          if [[ -z "${LINUX_SRC}" ]]; then
+            echo "[ERROR] linux source directory not found under output/build"
             exit 1
           fi
 
-          echo "[INFO] Building modules in:${EXISTING_SUBDIRS}"
+          # Store relative-to-workspace-root path.
+          echo "LINUX_SRC=operating-system/${LINUX_SRC}" >> "$GITHUB_ENV"
 
-          # Build all target subdirectories in a single make invocation so
-          # that modpost runs once over all of them, resolving cross-subdir
-          # symbol dependencies (e.g. nfsd depends on exportfs symbols).
-          # M= accepts a space-separated list of directories.
-          # KBUILD_MODPOST_WARN=1 downgrades "unresolved symbol" modpost
-          # errors to warnings – expected because we are not building the
-          # full kernel (no vmlinux symbol table), so some references to
-          # built-in kernel symbols cannot be verified at this stage.
-          M_VALUE=$(echo "${EXISTING_SUBDIRS}" | xargs)
-          make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-            KBUILD_MODPOST_WARN=1 \
-            M="${M_VALUE}" \
-            modules 2>&1
-
-          # Count the .ko files produced.
-          BUILT=$(find ${EXISTING_SUBDIRS} -name '*.ko' 2>/dev/null | wc -l)
-          echo "built=${BUILT}" >> "$GITHUB_OUTPUT"
-
-          if [[ ${BUILT} -eq 0 ]]; then
-            echo "[ERROR] No .ko files were produced."
-            exit 1
-          fi
-
-          echo "[INFO] Built ${BUILT} .ko file(s) successfully."
-
-      # -----------------------------------------------------------------------
-      # 8. Collect .ko files and rename them for release
-      # -----------------------------------------------------------------------
-      - name: Collect and rename .ko files
+      - name: Extract and rename .ko files
         run: |
           VERSION="${{ matrix.version }}"
           BOARD="${{ matrix.board }}"
           OUT_DIR="output_modules/${VERSION}/${BOARD}"
           mkdir -p "${OUT_DIR}"
 
-          MODULE_NAMES=(xfs nfs nfsd exportfs)
-          COLLECTED=0
-
+          MODULE_NAMES=(xfs nfs nfsd)
           for mod in "${MODULE_NAMES[@]}"; do
-            KO_PATH=$(find linux-src -type f -name "${mod}.ko" 2>/dev/null | head -1 || true)
+            KO_PATH=$(find "${LINUX_SRC}" \
+              -type f -name "${mod}.ko" 2>/dev/null | head -1 || true)
 
             if [[ -n "${KO_PATH}" ]]; then
               DEST="${OUT_DIR}/${mod}_${VERSION}_${BOARD}.ko"
               cp "${KO_PATH}" "${DEST}"
               echo "[OK] ${DEST}"
-              COLLECTED=$((COLLECTED + 1))
             else
-              echo "[WARN] ${mod}.ko not found – it may be built-in or disabled on ${BOARD}."
+              echo "[WARN] ${mod}.ko not found – it may be built-in or not supported on ${BOARD}."
             fi
           done
 
-          if [[ ${COLLECTED} -eq 0 ]]; then
-            echo "[ERROR] No .ko files collected – something went wrong."
-            exit 1
-          fi
-
-          echo "[INFO] Collected ${COLLECTED} module(s) for ${BOARD} @ ${VERSION}."
-
-      # -----------------------------------------------------------------------
-      # 9. Upload modules as workflow artifacts
-      # -----------------------------------------------------------------------
       - name: Upload modules as workflow artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -640,7 +336,6 @@ jobs:
             | `xfs.ko` | XFS filesystem support |
             | `nfsd.ko` | NFS server daemon |
             | `nfs.ko` | NFS client support |
-            | `exportfs.ko` | Export filesystem support (NFS dependency) |
 
             ### Supported boards
             One set of `.ko` files is provided per board listed below.
