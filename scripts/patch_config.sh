@@ -16,9 +16,11 @@
 #   2. Ensures CONFIG_LOCALVERSION="-haos" so the kernel version string matches.
 #   3. Forces the following symbols to =m (compiled as loadable modules):
 #        CONFIG_XFS_FS
-#        CONFIG_NFSD
-#        CONFIG_NFSD_V4
-#        CONFIG_EXPORTFS
+#        CONFIG_NFS_FS       (NFS client)
+#        CONFIG_NFS_V4       (NFSv4 client support)
+#        CONFIG_NFSD         (NFS server)
+#        CONFIG_NFSD_V4      (NFSv4 server support)
+#        CONFIG_EXPORTFS     (export filesystem – required by nfsd)
 
 set -euo pipefail
 
@@ -97,6 +99,8 @@ set_config_string "CONFIG_LOCALVERSION" "-haos"
 echo "[INFO] Step 3: Forcing filesystem modules to =m ..."
 MODULES=(
     CONFIG_XFS_FS
+    CONFIG_NFS_FS
+    CONFIG_NFS_V4
     CONFIG_NFSD
     CONFIG_NFSD_V4
     CONFIG_EXPORTFS

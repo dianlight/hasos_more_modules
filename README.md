@@ -9,9 +9,11 @@ Available modules:
 | Module | Description |
 | :------- | :------------ |
 | `xfs.ko` | XFS filesystem support |
+| `nfs.ko` | NFS client support |
 | `nfsd.ko` | NFS server daemon |
+| `exportfs.ko` | Export filesystem support (required by `nfsd`) |
 
-Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Raspberry Pi 4 / ARM 64-bit).
+Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Raspberry Pi 4 / ARM 64-bit, and other aarch64 boards).
 
 ---
 
@@ -29,24 +31,38 @@ Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Rasp
 ## How the project works
 
 ```text
-┌─────────────────────────────────────┐
-│  GitHub Actions (main_build.yml)    │
-│                                     │
-│  1. check_releases.py               │
-│     └─ compares HAOS releases       │
-│        with already-built assets    │
-│                                     │
-│  2. patch_config.sh                 │
-│     └─ modifies kernel.config       │
-│        to enable modules as =m      │
-│                                     │
-│  3. make linux-modules              │
-│     └─ compiles only .ko modules    │
-│                                     │
-│  4. GitHub Release                  │
-│     └─ uploads .ko assets named     │
-│        {mod}_{ver}_{arch}.ko        │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│  GitHub Actions (main_build.yml)        │
+│                                         │
+│  1. check_releases.py                   │
+│     └─ compares HAOS releases           │
+│        with already-built assets        │
+│                                         │
+│  2. Parse board defconfig               │
+│     └─ extracts kernel version,         │
+│        base config, fragments, arch     │
+│                                         │
+│  3. Download linux-<version>.tar.xz     │
+│     └─ exact kernel source from         │
+│        kernel.org (no Buildroot)        │
+│                                         │
+│  4. Assemble .config                    │
+│     └─ base config + fragments merged   │
+│        with merge_config.sh, then       │
+│        patch_config.sh enables =m       │
+│                                         │
+│  5. make modules_prepare               │
+│     └─ prepares headers / symvers       │
+│        without building the full image  │
+│                                         │
+│  6. make M=<subdir> modules             │
+│     └─ compiles xfs, nfs, nfsd,        │
+│        exportfs .ko files               │
+│                                         │
+│  7. GitHub Release                      │
+│     └─ uploads .ko assets named         │
+│        {mod}_{ver}_{board}.ko           │
+└─────────────────────────────────────────┘
 ```
 
 The workflow runs:
@@ -68,7 +84,7 @@ The workflow runs:
 
 Download the `.ko` file matching your version and architecture from the
 [Releases](../../releases) page of this repository.  
-Example: `xfs_13.2_x86_64.ko`.
+Example: `xfs_13.2_generic_x86_64.ko`.
 
 ### Step 2 – Upload the module to the system
 
@@ -158,7 +174,7 @@ depmod -a
 mount -o remount,ro /
 
 # Load modules
-for mod in xfs nfsd; do
+for mod in xfs nfs nfsd exportfs; do
     modprobe "${mod}" 2>/dev/null && \
         echo "[haos_more_modules] Module ${mod} loaded." || \
         echo "[haos_more_modules] Module ${mod} not found or already built-in."
@@ -200,8 +216,9 @@ ERROR: could not insert module xfs.ko: Invalid module format
 | Situation | Result |
 | :---------- | :------- |
 | Module compiled for HAOS 13.2, running on HAOS 13.2 | ✅ Works |
-| Module compiled for HAOS 13.2, running on HAOS 13.1 | ❌ Fails |
-| Module compiled for HAOS 13.2, running after an upgrade to 13.3 | ❌ Fails |
+| Module compiled for HAOS 13.2, running on HAOS 13.1 | ❌ Fails (version mismatch) |
+| Module compiled for HAOS 13.2, running after an upgrade to 13.3 | ❌ Fails (version mismatch) |
+| Module compiled for board A, loaded on board B (same HAOS version) | ❌ Fails (wrong config) |
 
 **Solution:** always download the module that matches **exactly** the installed
 HAOS version. After every HAOS update you must replace the modules with the
@@ -232,10 +249,10 @@ python3 scripts/check_releases.py \
 # Copy a sample kernel.config
 cp /boot/config-$(uname -r) /tmp/test.config
 
-bash scripts/patch_config.sh /tmp/test.config x86_64
+bash scripts/patch_config.sh /tmp/test.config generic_x86_64
 
 # Verify the patched values
-grep -E "CONFIG_MODULES|CONFIG_LOCALVERSION|CONFIG_XFS|CONFIG_NFS|CONFIG_EXPORTFS" \
+grep -E "CONFIG_MODULES|CONFIG_LOCALVERSION|CONFIG_XFS_FS|CONFIG_NFS|CONFIG_EXPORTFS" \
     /tmp/test.config
 ```
 
@@ -250,12 +267,19 @@ hasos_more_modules/
 │       └── main_build.yml      # Main CI/CD workflow
 ├── scripts/
 │   ├── check_releases.py       # HAOS missing-release detection
-│   └── patch_config.sh         # kernel.config patch
+│   └── patch_config.sh         # kernel .config patch (enables modules as =m)
 ├── .gitignore
 ├── LICENSE
 ├── README.md                   # This file
 └── requirements.txt            # Python dependencies
 ```
+
+> **Note on build approach:** the workflow does **not** use Buildroot to compile
+> modules.  Instead it downloads the exact kernel source tarball from kernel.org,
+> reconstructs the merged `.config` (base config + all fragment files listed in
+> the board defconfig), and then runs `make modules_prepare` followed by
+> `make M=<subdir> modules` directly.  This avoids the need to build a full OS
+> image or Buildroot toolchain and keeps each CI job fast (~5 min per board).
 
 ---
 
