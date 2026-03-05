@@ -181,17 +181,44 @@ jobs:
             exit 1
           fi
 
-          # ── Kernel version ────────────────────────────────────────────────
-          KERNEL_VERSION=$(grep '^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=' "${DEFCONFIG}" \
-            | cut -d'"' -f2)
+          # ── Kernel source ─────────────────────────────────────────────────
+          # Three mutually exclusive kernel source modes in Buildroot:
+          #   BR2_LINUX_KERNEL_CUSTOM_VERSION  → standard kernel.org tarball
+          #   BR2_LINUX_KERNEL_CUSTOM_TARBALL  → arbitrary tarball URL (e.g. RPi fork)
+          #   BR2_LINUX_KERNEL_LATEST_VERSION  → latest stable (not used by HAOS)
 
-          if [[ -z "${KERNEL_VERSION}" ]]; then
-            echo "[ERROR] Could not find BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE in ${DEFCONFIG}"
+          if grep -q '^BR2_LINUX_KERNEL_CUSTOM_VERSION=y' "${DEFCONFIG}"; then
+            KERNEL_VERSION=$(grep '^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=' "${DEFCONFIG}" \
+              | cut -d'"' -f2)
+            KERNEL_SOURCE_TYPE="kernel_org"
+            KERNEL_TARBALL_URL=""
+            echo "[INFO] Kernel source: kernel.org ${KERNEL_VERSION}"
+
+          elif grep -q '^BR2_LINUX_KERNEL_CUSTOM_TARBALL=y' "${DEFCONFIG}"; then
+            KERNEL_TARBALL_URL=$(grep '^BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION=' "${DEFCONFIG}" \
+              | cut -d'"' -f2)
+            # Derive a human-readable version label from the URL basename,
+            # stripping the .tar.gz suffix (e.g. "stable_20250916").
+            TARBALL_BASE=$(basename "${KERNEL_TARBALL_URL}" .tar.gz)
+            KERNEL_VERSION="${TARBALL_BASE}"
+            KERNEL_SOURCE_TYPE="custom_tarball"
+            echo "[INFO] Kernel source: custom tarball ${KERNEL_TARBALL_URL}"
+
+          else
+            echo "[ERROR] Unknown kernel source type in ${DEFCONFIG}" \
+                 "(neither BR2_LINUX_KERNEL_CUSTOM_VERSION nor BR2_LINUX_KERNEL_CUSTOM_TARBALL)"
             exit 1
           fi
 
-          echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Kernel version: ${KERNEL_VERSION}"
+          if [[ -z "${KERNEL_VERSION}" ]]; then
+            echo "[ERROR] Could not determine kernel version from ${DEFCONFIG}"
+            exit 1
+          fi
+
+          echo "kernel_version=${KERNEL_VERSION}"         >> "$GITHUB_OUTPUT"
+          echo "kernel_source_type=${KERNEL_SOURCE_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "kernel_tarball_url=${KERNEL_TARBALL_URL}" >> "$GITHUB_OUTPUT"
+          echo "Kernel version label: ${KERNEL_VERSION}"
 
           # ── Architecture ──────────────────────────────────────────────────
           if grep -q '^BR2_x86_64=y' "${DEFCONFIG}"; then
@@ -230,14 +257,29 @@ jobs:
 
             echo "base_config_type=custom"    >> "$GITHUB_OUTPUT"
             echo "base_config=${BASE_CONFIG}" >> "$GITHUB_OUTPUT"
+            echo "base_config_defconfig="     >> "$GITHUB_OUTPUT"
             echo "Base config (custom): ${BASE_CONFIG}"
 
-          else
-            # BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG – the kernel's own
-            # arch defconfig will be used; we record it as "arch_default".
+          elif grep -q '^BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y' "${DEFCONFIG}"; then
+            # Use the kernel's built-in arch default (e.g. "make arm64_defconfig").
             echo "base_config_type=arch_default" >> "$GITHUB_OUTPUT"
             echo "base_config="                  >> "$GITHUB_OUTPUT"
+            echo "base_config_defconfig="        >> "$GITHUB_OUTPUT"
             echo "Base config: arch default (defconfig)"
+
+          else
+            # BR2_LINUX_KERNEL_DEFCONFIG – a named defconfig shipped with the
+            # kernel source (e.g. "bcm2711" → "make bcm2711_defconfig").
+            NAMED_DEFCONFIG=$(grep '^BR2_LINUX_KERNEL_DEFCONFIG=' "${DEFCONFIG}" \
+              | cut -d'"' -f2)
+            if [[ -z "${NAMED_DEFCONFIG}" ]]; then
+              echo "[ERROR] Could not determine base kernel config from ${DEFCONFIG}"
+              exit 1
+            fi
+            echo "base_config_type=named_defconfig"           >> "$GITHUB_OUTPUT"
+            echo "base_config="                               >> "$GITHUB_OUTPUT"
+            echo "base_config_defconfig=${NAMED_DEFCONFIG}"   >> "$GITHUB_OUTPUT"
+            echo "Base config: named defconfig (make ${NAMED_DEFCONFIG}_defconfig)"
           fi
 
           # ── Config fragment files ─────────────────────────────────────────
@@ -286,19 +328,43 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Download Linux ${{ steps.defconfig.outputs.kernel_version }} source
         run: |
+          KERNEL_SOURCE_TYPE="${{ steps.defconfig.outputs.kernel_source_type }}"
           KERNEL_VERSION="${{ steps.defconfig.outputs.kernel_version }}"
+          KERNEL_TARBALL_URL="${{ steps.defconfig.outputs.kernel_tarball_url }}"
 
-          # kernel.org layout: /pub/linux/kernel/v<MAJOR>.x/linux-<VERSION>.tar.xz
-          MAJOR=$(echo "${KERNEL_VERSION}" | cut -d. -f1)
-          TARBALL="linux-${KERNEL_VERSION}.tar.xz"
-          URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
+          if [[ "${KERNEL_SOURCE_TYPE}" == "kernel_org" ]]; then
+            # Standard kernel.org tarball.
+            # Layout: /pub/linux/kernel/v<MAJOR>.x/linux-<VERSION>.tar.xz
+            MAJOR=$(echo "${KERNEL_VERSION}" | cut -d. -f1)
+            TARBALL="linux-${KERNEL_VERSION}.tar.xz"
+            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
+            echo "Downloading ${URL} ..."
+            wget -q --show-progress --tries=3 --timeout=120 "${URL}" -O "${TARBALL}"
+            echo "Extracting ..."
+            tar -xf "${TARBALL}"
+            mv "linux-${KERNEL_VERSION}" linux-src
+            rm "${TARBALL}"
 
-          echo "Downloading ${URL} ..."
-          wget -q --show-progress --tries=3 --timeout=60 "${URL}" -O "${TARBALL}"
-          echo "Extracting ..."
-          tar -xf "${TARBALL}"
-          mv "linux-${KERNEL_VERSION}" linux-src
-          rm "${TARBALL}"
+          else
+            # Custom tarball (e.g. Raspberry Pi Linux fork on GitHub).
+            # The tarball URL points to a GitHub archive; when extracted the
+            # top-level directory is named  linux-<branch/tag>.
+            TARBALL="linux-custom.tar.gz"
+            echo "Downloading ${KERNEL_TARBALL_URL} ..."
+            wget -q --show-progress --tries=3 --timeout=300 \
+              "${KERNEL_TARBALL_URL}" -O "${TARBALL}"
+            echo "Extracting ..."
+            tar -xf "${TARBALL}"
+            # The extracted directory name varies; find the first linux-* dir.
+            EXTRACTED=$(find . -maxdepth 1 -type d -name 'linux-*' | head -1)
+            if [[ -z "${EXTRACTED}" ]]; then
+              echo "[ERROR] Could not find extracted linux source directory"
+              exit 1
+            fi
+            mv "${EXTRACTED}" linux-src
+            rm "${TARBALL}"
+          fi
+
           echo "Kernel source ready at linux-src/"
 
       # -----------------------------------------------------------------------
@@ -318,10 +384,14 @@ jobs:
           BASE_CONFIG_TYPE="${{ steps.defconfig.outputs.base_config_type }}"
           BASE_CONFIG="${{ steps.defconfig.outputs.base_config }}"
           FRAGMENTS="${{ steps.defconfig.outputs.fragments }}"
+          # Resolve base_config path relative to workspace root (one level up
+          # from linux-src where we cd into below).
 
           cd linux-src
 
           # ── Step a: base config ───────────────────────────────────────────
+          BASE_CONFIG_DEFCONFIG="${{ steps.defconfig.outputs.base_config_defconfig }}"
+
           if [[ "${BASE_CONFIG_TYPE}" == "custom" ]]; then
             echo "[INFO] Copying custom base config: ${BASE_CONFIG}"
             cp "../${BASE_CONFIG}" .config
@@ -329,6 +399,12 @@ jobs:
             # exact kernel version without interactive prompts.
             make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
               olddefconfig
+
+          elif [[ "${BASE_CONFIG_TYPE}" == "named_defconfig" ]]; then
+            echo "[INFO] Generating named defconfig: make ${BASE_CONFIG_DEFCONFIG}_defconfig"
+            make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
+              "${BASE_CONFIG_DEFCONFIG}_defconfig"
+
           else
             echo "[INFO] Generating arch default config (make defconfig)"
             make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
@@ -384,6 +460,10 @@ jobs:
         run: |
           cd linux-src
           echo "[INFO] Running make modules_prepare ..."
+          # modules_prepare sets up headers, auto-generated files, and the
+          # scripts/mod/modpost binary – everything needed to compile modules.
+          # It does NOT produce Module.symvers; that is generated during the
+          # actual module build pass with KBUILD_MODPOST_WARN=1 below.
           make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
             modules_prepare 2>&1
           echo "[INFO] modules_prepare done."
@@ -410,47 +490,59 @@ jobs:
         run: |
           cd linux-src
 
-          # Associate module names with their source subdirectories.
-          # Format: "module_name:path/to/subdir"
-          declare -A MOD_DIRS=(
-            [xfs]="fs/xfs"
-            [nfs]="fs/nfs"
-            [nfsd]="fs/nfsd"
-            [exportfs]="fs/exportfs"
-          )
+          # ── Generate Module.symvers ───────────────────────────────────────
+          # modules_prepare alone does NOT produce Module.symvers; modpost
+          # needs it to resolve inter-module symbol dependencies.  The
+          # correct minimal approach is to build all in-tree modules for
+          # only the subdirectories we care about in a single make invocation,
+          # which causes modpost to run once over all of them together and
+          # produce Module.symvers.  We pass KBUILD_MODPOST_WARN=1 so that
+          # any remaining unresolved symbols from other kernel subsystems
+          # become warnings rather than hard errors.
 
-          BUILT=0
-          FAILED=0
+          SUBDIRS="fs/exportfs fs/xfs fs/nfs fs/nfsd"
 
-          for mod in xfs nfs nfsd exportfs; do
-            subdir="${MOD_DIRS[$mod]}"
-
-            # Skip if the subdir doesn't exist (board may not include it).
-            if [[ ! -d "${subdir}" ]]; then
-              echo "[WARN] Source directory not found for ${mod}: ${subdir} – skipping."
-              continue
-            fi
-
-            echo "[INFO] Building ${mod} from ${subdir} ..."
-            if make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
-                  M="${subdir}" modules 2>&1; then
-              echo "[OK] ${mod} built successfully."
-              BUILT=$((BUILT + 1))
+          # Filter to only subdirs that actually exist in this kernel tree.
+          EXISTING_SUBDIRS=""
+          for s in ${SUBDIRS}; do
+            if [[ -d "${s}" ]]; then
+              EXISTING_SUBDIRS="${EXISTING_SUBDIRS} ${s}"
             else
-              echo "[ERROR] Failed to build ${mod}."
-              FAILED=$((FAILED + 1))
+              echo "[WARN] Subdir not found, skipping: ${s}"
             fi
           done
 
-          echo "built=${BUILT}"   >> "$GITHUB_OUTPUT"
-          echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
-
-          if [[ ${FAILED} -gt 0 ]]; then
-            echo "[ERROR] ${FAILED} module(s) failed to build."
+          if [[ -z "${EXISTING_SUBDIRS}" ]]; then
+            echo "[ERROR] None of the target module subdirectories exist in this kernel tree."
             exit 1
           fi
 
-          echo "[INFO] All modules built successfully (${BUILT} total)."
+          echo "[INFO] Building modules in:${EXISTING_SUBDIRS}"
+
+          # Build all target subdirectories in a single make invocation so
+          # that modpost runs once over all of them, resolving cross-subdir
+          # symbol dependencies (e.g. nfsd depends on exportfs symbols).
+          # M= accepts a space-separated list of directories.
+          # KBUILD_MODPOST_WARN=1 downgrades "unresolved symbol" modpost
+          # errors to warnings – expected because we are not building the
+          # full kernel (no vmlinux symbol table), so some references to
+          # built-in kernel symbols cannot be verified at this stage.
+          M_VALUE=$(echo "${EXISTING_SUBDIRS}" | xargs)
+          make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" \
+            KBUILD_MODPOST_WARN=1 \
+            M="${M_VALUE}" \
+            modules 2>&1
+
+          # Count the .ko files produced.
+          BUILT=$(find ${EXISTING_SUBDIRS} -name '*.ko' 2>/dev/null | wc -l)
+          echo "built=${BUILT}" >> "$GITHUB_OUTPUT"
+
+          if [[ ${BUILT} -eq 0 ]]; then
+            echo "[ERROR] No .ko files were produced."
+            exit 1
+          fi
+
+          echo "[INFO] Built ${BUILT} .ko file(s) successfully."
 
       # -----------------------------------------------------------------------
       # 8. Collect .ko files and rename them for release
