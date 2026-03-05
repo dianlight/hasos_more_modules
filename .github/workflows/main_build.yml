@@ -159,9 +159,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential cpio flex \
-            libelf-dev libncurses-dev libssl-dev \
-            python3 python3-jinja2 rsync unzip wget
+            bc bison build-essential cpio file flex \
+            gettext libelf-dev libglib2.0-dev libncurses-dev libssl-dev \
+            python3 python3-jinja2 quilt rsync unzip wget diffstat
 
       - name: Locate kernel config for ${{ matrix.board }}
         id: locate-config
@@ -246,17 +246,82 @@ jobs:
         run: |
           cd operating-system
 
+          # Resolve the prefix for the system cross-compiler already installed
+          # by apt (e.g. /usr/bin/aarch64-linux-gnu-gcc → prefix /usr).
+          # Buildroot's external-toolchain wrapper needs this directory.
+          TOOLCHAIN_PREFIX="/usr"
+
+          # Determine the sysroot for the installed cross-compiler.
+          CROSS_GCC="${CROSS_COMPILE}gcc"
+          TOOLCHAIN_SYSROOT=$(${CROSS_GCC} -print-sysroot 2>/dev/null || echo "/usr")
+          echo "[INFO] Cross-compiler : ${CROSS_GCC}"
+          echo "[INFO] Toolchain prefix : ${TOOLCHAIN_PREFIX}"
+          echo "[INFO] Toolchain sysroot: ${TOOLCHAIN_SYSROOT}"
+
           # Apply the board defconfig so Buildroot knows what to build.
           make BR2_EXTERNAL=buildroot-external \
                "${{ steps.locate-config.outputs.defconfig }}" \
                2>&1 | tail -20
 
+          # ---------------------------------------------------------------
+          # Inject CI-safe overrides into output/.config BEFORE Buildroot
+          # processes it further.  These four changes are essential:
+          #
+          #  1. BR2_DL_DIR / BR2_CCACHE_DIR  — the defconfigs hard-code
+          #     /cache/dl and /cache/cc which do not exist on GH runners.
+          #  2. BR2_CCACHE=n                 — ccache is not installed.
+          #  3. Switch from the internal Buildroot toolchain
+          #     (BR2_TOOLCHAIN_BUILDROOT_CXX=y) to a pre-installed external
+          #     one (the cross-compiler installed via apt in the previous
+          #     step).  Without this Buildroot would spend hours downloading
+          #     and compiling binutils+gcc+glibc before touching the kernel.
+          # ---------------------------------------------------------------
+          echo "[INFO] Patching output/.config to use external toolchain ..."
+
+          # Fix download/cache directories.
+          sed -i 's|^BR2_DL_DIR=.*|BR2_DL_DIR="$(TOPDIR)/../br-dl"|'      output/.config
+          sed -i 's|^BR2_CCACHE_DIR=.*|BR2_CCACHE_DIR="$(TOPDIR)/../br-cc"|' output/.config
+
+          # Disable ccache.
+          sed -i 's|^BR2_CCACHE=y|BR2_CCACHE=n|'                           output/.config
+
+          # Disable the internal Buildroot toolchain.
+          sed -i 's|^BR2_TOOLCHAIN_BUILDROOT=y|# BR2_TOOLCHAIN_BUILDROOT is not set|'       output/.config
+          sed -i 's|^BR2_TOOLCHAIN_BUILDROOT_CXX=y|# BR2_TOOLCHAIN_BUILDROOT_CXX is not set|' output/.config
+
+          # Enable the external (pre-installed) toolchain.
+          # Only append if not already present.
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL=y' output/.config || \
+            echo 'BR2_TOOLCHAIN_EXTERNAL=y' >> output/.config
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y' output/.config || \
+            echo 'BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y' >> output/.config
+
+          # Point Buildroot at the system toolchain prefix.
+          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PATH=' output/.config; then
+            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PATH=.*|BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_PREFIX}\"|" output/.config
+          else
+            echo "BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_PREFIX}\"" >> output/.config
+          fi
+
+          # Set the C++ support flag for the external toolchain.
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CXX=y' output/.config || \
+            echo 'BR2_TOOLCHAIN_EXTERNAL_CXX=y' >> output/.config
+
+          # Resolve any symbol conflicts introduced by the above changes.
+          echo "[INFO] Running make olddefconfig to settle the config ..."
+          make olddefconfig 2>&1 | tail -20
+
+          echo "[INFO] Effective toolchain settings:"
+          grep -E '^BR2_TOOLCHAIN' output/.config || true
+
           # Configure the kernel (merges all config fragments including the
           # patched board-specific one).
-          make linux-configure 2>&1 | tail -40
+          echo "[INFO] Running make linux-configure ..."
+          make linux-configure 2>&1 | tail -60
 
           # Build only the kernel modules – no full OS image.
-          make linux-modules 2>&1 | tail -80
+          echo "[INFO] Running make linux-modules ..."
+          make linux-modules 2>&1 | tail -100
 
           # Record the kernel source directory for the extraction step.
           LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" | head -1)
