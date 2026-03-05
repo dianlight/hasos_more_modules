@@ -7,7 +7,7 @@ Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled
 Available modules:
 
 | Module | Description |
-|:-------|:------------|
+| :------- | :------------ |
 | `xfs.ko` | XFS filesystem support |
 | `nfs.ko` | NFS client (Network File System) |
 | `nfsd.ko` | NFS server daemon |
@@ -200,7 +200,7 @@ ERROR: could not insert module xfs.ko: Invalid module format
 **Practical implications:**
 
 | Situation | Result |
-|:----------|:-------|
+| :---------- | :------- |
 | Module compiled for HAOS 13.2, running on HAOS 13.2 | ✅ Works |
 | Module compiled for HAOS 13.2, running on HAOS 13.1 | ❌ Fails |
 | Module compiled for HAOS 13.2, running after an upgrade to 13.3 | ❌ Fails |
