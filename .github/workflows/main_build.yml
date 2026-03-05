@@ -152,6 +152,7 @@ jobs:
           ref: ${{ matrix.version }}
           path: operating-system
           fetch-depth: 1
+          submodules: recursive
 
       # Buildroot needs a set of host packages.
       - name: Install host build dependencies
@@ -174,17 +175,29 @@ jobs:
 
           echo "Using defconfig: ${DEFCONFIG}"
 
-          # The board-specific kernel fragment is the last kernel.config entry
-          # listed in BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES.
-          # Resolve $(BR2_EXTERNAL_HASSOS_PATH) to the checkout path.
+          # Some boards use BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG with a full base
+          # config file; others use BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG and
+          # a board-level fragment ending in kernel.config.  Handle both cases.
+
+          # First, try to find a board-level kernel.config fragment in
+          # BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES.
           KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES' "${DEFCONFIG}" \
             | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^" ]+kernel\.config' \
             | tail -1 \
             | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
             || true)
 
+          # If no fragment was found, fall back to BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE
+          # (used by boards like khadas_vim3, odroid_c2, odroid_c4).
           if [[ -z "${KERNEL_CONFIG}" ]]; then
-            echo "[ERROR] Could not find a kernel config fragment in ${DEFCONFIG}"
+            KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE' "${DEFCONFIG}" \
+              | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^"]+' \
+              | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
+              || true)
+          fi
+
+          if [[ -z "${KERNEL_CONFIG}" ]]; then
+            echo "[ERROR] Could not find a kernel config in ${DEFCONFIG}"
             exit 1
           fi
 
