@@ -1,0 +1,14 @@
+# Runtime dependencies for scripts/check_releases.py
+#
+# The script uses only the Python standard library (urllib, json, argparse),
+# so there are no mandatory third-party packages.
+#
+# The packages below are optional quality-of-life extras that make local
+# development easier.
+
+# Pretty-print JSON responses during debugging (optional).
+# Uncomment if needed:
+# rich>=13.0
+
+# Type checking (development only).
+# mypy>=1.0
