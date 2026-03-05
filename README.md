@@ -1,266 +1,267 @@
 # hasos_more_modules
 
-> **Nota:** questo progetto è mantenuto dalla comunità e non è affiliato con Nabu Casa / Home Assistant ufficiale.
+> **Note:** this project is community-maintained and is not affiliated with Nabu Casa / official Home Assistant.
 
-Moduli kernel extra per **Home Assistant OS (HAOS)** – compilati automaticamente per ogni nuova release.
+Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled for every new release.
 
-I moduli disponibili sono:
+Available modules:
 
-| Modulo | Descrizione |
-|--------|-------------|
-| `xfs.ko` | Supporto al filesystem XFS |
-| `nfs.ko` | Client NFS (Network File System) |
-| `nfsd.ko` | Server NFS daemon |
+| Module | Description |
+|:-------|:------------|
+| `xfs.ko` | XFS filesystem support |
+| `nfs.ko` | NFS client (Network File System) |
+| `nfsd.ko` | NFS server daemon |
 
-Architetture supportate: **x86_64** (OVA / generic x86-64) e **aarch64** (Raspberry Pi 4 / ARM 64-bit).
-
----
-
-## Indice
-
-1. [Come funziona il progetto](#come-funziona-il-progetto)
-2. [Installazione dei moduli su HAOS](#installazione-dei-moduli-su-haos)
-3. [Rendere i moduli persistenti](#rendere-i-moduli-persistenti)
-4. [Avvertenza sul Kernel Version Magic](#avvertenza-sul-kernel-version-magic)
-5. [Sviluppo locale](#sviluppo-locale)
-6. [Struttura del repository](#struttura-del-repository)
+Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Raspberry Pi 4 / ARM 64-bit).
 
 ---
 
-## Come funziona il progetto
+## Table of Contents
 
-```
+1. [How the project works](#how-the-project-works)
+2. [Installing modules on HAOS](#installing-modules-on-haos)
+3. [Making modules persistent](#making-modules-persistent)
+4. [Warning about Kernel Version Magic](#warning-about-kernel-version-magic)
+5. [Local development](#local-development)
+6. [Repository structure](#repository-structure)
+
+---
+
+## How the project works
+
+```text
 ┌─────────────────────────────────────┐
-│  GitHub Actions (main_build.yml)     │
+│  GitHub Actions (main_build.yml)    │
 │                                     │
 │  1. check_releases.py               │
-│     └─ confronta le release HAOS    │
-│        con gli asset già compilati  │
+│     └─ compares HAOS releases       │
+│        with already-built assets    │
 │                                     │
 │  2. patch_config.sh                 │
-│     └─ modifica kernel.config       │
-│        per abilitare i moduli =m    │
+│     └─ modifies kernel.config       │
+│        to enable modules as =m      │
 │                                     │
 │  3. make linux-modules              │
-│     └─ compila i soli moduli .ko    │
+│     └─ compiles only .ko modules    │
 │                                     │
 │  4. GitHub Release                  │
-│     └─ carica gli asset .ko con     │
-│        nome {mod}_{ver}_{arch}.ko   │
+│     └─ uploads .ko assets named     │
+│        {mod}_{ver}_{arch}.ko        │
 └─────────────────────────────────────┘
 ```
 
-Il workflow viene eseguito:
-- **Automaticamente** ogni giorno alle 06:00 UTC (cron).
-- **Manualmente** dalla tab *Actions* del repository.
-- **Via API** con un evento `repository_dispatch` di tipo `build-modules`.
+The workflow runs:
+
+- **Automatically** every day at 06:00 UTC (cron).
+- **Manually** from the *Actions* tab of the repository.
+- **Via API** with a `repository_dispatch` event of type `build-modules`.
 
 ---
 
-## Installazione dei moduli su HAOS
+## Installing modules on HAOS
 
-### Prerequisiti
+### Prerequisites
 
-- Accesso SSH abilitato su HAOS (vedi *Impostazioni → Sistema → Accesso SSH*).
-- Versione HAOS corrispondente al modulo da installare.
+- SSH access enabled on HAOS (see *Settings → System → SSH Access*).
+- HAOS version matching the module to install.
 
-### Passo 1 – Scaricare il modulo
+### Step 1 – Download the module
 
-Scarica il file `.ko` corrispondente alla tua versione e architettura dalla
-pagina [Releases](../../releases) di questo repository.  
-Esempio: `xfs_13.2_x86_64.ko`.
+Download the `.ko` file matching your version and architecture from the
+[Releases](../../releases) page of this repository.  
+Example: `xfs_13.2_x86_64.ko`.
 
-### Passo 2 – Caricare il modulo sul sistema
+### Step 2 – Upload the module to the system
 
 ```bash
-# Copia il file sul sistema (da un terminale SSH)
+# Copy the file to the system (from an SSH terminal)
 scp xfs_13.2_x86_64.ko root@homeassistant.local:/tmp/
 ```
 
-### Passo 3 – Rimontare `/` in lettura-scrittura
+### Step 3 – Remount `/` as read-write
 
-HAOS monta la partizione di sistema (`/`) in **sola lettura** per garantirne
-l'integrità.  Prima di copiare il modulo nella posizione definitiva è
-necessario rimontarla in lettura-scrittura:
+HAOS mounts the system partition (`/`) as **read-only** to ensure its
+integrity. Before copying the module to its final location you need to
+remount it as read-write:
 
 ```bash
-# Rimonta / in read-write
+# Remount / as read-write
 mount -o remount,rw /
 
-# Crea la directory dei moduli se non esiste
+# Create the modules directory if it doesn't exist
 mkdir -p /lib/modules/$(uname -r)/extra
 
-# Copia il modulo
+# Copy the module
 cp /tmp/xfs_13.2_x86_64.ko /lib/modules/$(uname -r)/extra/xfs.ko
 
-# Aggiorna il database dei moduli
+# Update the module database
 depmod -a
 ```
 
-### Passo 4 – Caricare il modulo
+### Step 4 – Load the module
 
 ```bash
-modprobe xfs        # carica il modulo (e le sue dipendenze)
-# oppure
+modprobe xfs        # load the module (and its dependencies)
+# or
 insmod /lib/modules/$(uname -r)/extra/xfs.ko
 ```
 
-Per verificare che il modulo sia stato caricato correttamente:
+To verify that the module was loaded correctly:
 
 ```bash
 lsmod | grep xfs
 dmesg | tail -20
 ```
 
-> **Attenzione:** al prossimo aggiornamento/riavvio, HAOS rimonta `/` in sola
-> lettura e i file copiati in `/lib/modules` vengono rimossi.  Vedi la sezione
-> successiva per rendere il modulo persistente.
+> **Warning:** on the next update/reboot, HAOS remounts `/` as read-only
+> and files copied to `/lib/modules` are removed. See the next section
+> to make the module persistent.
 
 ---
 
-## Rendere i moduli persistenti
+## Making modules persistent
 
-Il metodo consigliato è utilizzare la partizione `/mnt/data`, che **sopravvive
-agli aggiornamenti** di HAOS.
+The recommended method is to use the `/mnt/data` partition, which **survives
+HAOS updates**.
 
-### Struttura delle directory
+### Directory structure
 
-```
+```text
 /mnt/data/
 └── modules/
-    └── <versione-kernel>/
+    └── <kernel-version>/
         └── extra/
             ├── xfs.ko
             ├── nfs.ko
             └── nfsd.ko
 ```
 
-### Script di avvio
+### Startup script
 
-Crea il file `/mnt/data/modules/load_modules.sh`:
+Create the file `/mnt/data/modules/load_modules.sh`:
 
 ```bash
 #!/bin/sh
-# Carica i moduli extra al boot di HAOS.
+# Load extra modules at HAOS boot.
 
 KERNEL_VER=$(uname -r)
 MODULE_DIR="/mnt/data/modules/${KERNEL_VER}/extra"
 
 if [ ! -d "${MODULE_DIR}" ]; then
-    echo "[haos_more_modules] Directory moduli non trovata: ${MODULE_DIR}"
+    echo "[haos_more_modules] Module directory not found: ${MODULE_DIR}"
     exit 0
 fi
 
-# Copia i moduli nella posizione di sistema
+# Copy modules to the system location
 mount -o remount,rw /
 mkdir -p "/lib/modules/${KERNEL_VER}/extra"
 cp "${MODULE_DIR}"/*.ko "/lib/modules/${KERNEL_VER}/extra/" 2>/dev/null || true
 depmod -a
 mount -o remount,ro /
 
-# Carica i moduli
+# Load modules
 for mod in xfs nfs nfsd; do
     modprobe "${mod}" 2>/dev/null && \
-        echo "[haos_more_modules] Modulo ${mod} caricato." || \
-        echo "[haos_more_modules] Modulo ${mod} non trovato o già integrato."
+        echo "[haos_more_modules] Module ${mod} loaded." || \
+        echo "[haos_more_modules] Module ${mod} not found or already built-in."
 done
 ```
 
-### Integrazione con i container (Advanced SSH & Web Terminal Add-on)
+### Integration with containers (Advanced SSH & Web Terminal Add-on)
 
-Se usi l'add-on *Advanced SSH & Web Terminal*, puoi aggiungere il comando al
-file `~/.profile` o a un servizio `s6-rc` personalizzato.
+If you use the *Advanced SSH & Web Terminal* add-on, you can add the command to
+the `~/.profile` file or to a custom `s6-rc` service.
 
-Per un'integrazione permanente è possibile usare l'add-on
-[AppDaemon](https://github.com/hassio-addons/addon-appdaemon) oppure creare
-uno script S6 in `/mnt/data/supervisor/addons/local/`.
+For a permanent integration you can use the
+[AppDaemon](https://github.com/hassio-addons/addon-appdaemon) add-on or create
+an S6 script in `/mnt/data/supervisor/addons/local/`.
 
 ---
 
-## Avvertenza sul Kernel Version Magic
+## Warning about Kernel Version Magic
 
-I moduli kernel Linux incorporano una stringa chiamata **"version magic"** che
-deve corrispondere **esattamente** alla stringa del kernel in esecuzione.
+Linux kernel modules embed a string called **"version magic"** that must match
+**exactly** the string of the running kernel.
 
 ```bash
-# Visualizza la version magic del kernel in esecuzione
+# Show the version magic of the running kernel
 uname -r
 
-# Visualizza la version magic del modulo
+# Show the version magic of the module
 modinfo xfs.ko | grep vermagic
 ```
 
-Se le due stringhe **non coincidono**, il caricamento del modulo fallirà con:
+If the two strings **do not match**, loading the module will fail with:
 
-```
+```text
 ERROR: could not insert module xfs.ko: Invalid module format
 ```
 
-**Conseguenze pratiche:**
+**Practical implications:**
 
-| Situazione | Risultato |
-|------------|-----------|
-| Modulo compilato per HAOS 13.2, eseguito su HAOS 13.2 | ✅ Funziona |
-| Modulo compilato per HAOS 13.2, eseguito su HAOS 13.1 | ❌ Fallisce |
-| Modulo compilato per HAOS 13.2, eseguito dopo un aggiornamento a 13.3 | ❌ Fallisce |
+| Situation | Result |
+|:----------|:-------|
+| Module compiled for HAOS 13.2, running on HAOS 13.2 | ✅ Works |
+| Module compiled for HAOS 13.2, running on HAOS 13.1 | ❌ Fails |
+| Module compiled for HAOS 13.2, running after an upgrade to 13.3 | ❌ Fails |
 
-**Soluzione:** scarica sempre il modulo che corrisponde **esattamente** alla
-versione di HAOS installata.  Dopo ogni aggiornamento di HAOS è necessario
-sostituire i moduli con la versione compilata per il nuovo kernel.
+**Solution:** always download the module that matches **exactly** the installed
+HAOS version. After every HAOS update you must replace the modules with the
+version compiled for the new kernel.
 
 ---
 
-## Sviluppo locale
+## Local development
 
-### Requisiti
+### Requirements
 
 - Python ≥ 3.10
 - `pip install -r requirements.txt`
 
-### Verificare le release mancanti
+### Check for missing releases
 
 ```bash
-export GITHUB_TOKEN=ghp_...  # opzionale, aumenta il rate-limit API
+export GITHUB_TOKEN=ghp_...  # optional, increases API rate-limit
 
 python3 scripts/check_releases.py \
     --haos-repo home-assistant/operating-system \
     --this-repo dianlight/hasos_more_modules
 ```
 
-### Testare il patch della configurazione
+### Test the configuration patch
 
 ```bash
-# Copia un kernel.config di esempio
+# Copy a sample kernel.config
 cp /boot/config-$(uname -r) /tmp/test.config
 
 bash scripts/patch_config.sh /tmp/test.config x86_64
 
-# Verifica i valori patchati
+# Verify the patched values
 grep -E "CONFIG_MODULES|CONFIG_LOCALVERSION|CONFIG_XFS|CONFIG_NFS|CONFIG_EXPORTFS" \
     /tmp/test.config
 ```
 
 ---
 
-## Struttura del repository
+## Repository structure
 
-```
+```text
 hasos_more_modules/
 ├── .github/
 │   └── workflows/
-│       └── main_build.yml      # Workflow CI/CD principale
+│       └── main_build.yml      # Main CI/CD workflow
 ├── scripts/
-│   ├── check_releases.py       # Rilevamento release HAOS mancanti
-│   └── patch_config.sh         # Patch del kernel.config
+│   ├── check_releases.py       # HAOS missing-release detection
+│   └── patch_config.sh         # kernel.config patch
 ├── .gitignore
 ├── LICENSE
-├── README.md                   # Questo file
-└── requirements.txt            # Dipendenze Python
+├── README.md                   # This file
+└── requirements.txt            # Python dependencies
 ```
 
 ---
 
-## Licenza
+## License
 
-Questo progetto è distribuito sotto la licenza **MIT**.  
-Vedere il file [LICENSE](LICENSE) per i dettagli completi.
+This project is distributed under the **MIT** license.  
+See the [LICENSE](LICENSE) file for full details.

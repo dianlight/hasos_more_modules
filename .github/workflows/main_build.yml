@@ -27,7 +27,8 @@ concurrency:
 env:
   HAOS_REPO: home-assistant/operating-system
   THIS_REPO: ${{ github.repository }}
-  MODULES: "xfs nfs nfsd"
+  MODULES: "xfs nfsd"
+  MAX_VERSIONS: 5
   # Buildroot / cross-toolchain image used by HAOS.
   HAOS_BUILD_IMAGE: ghcr.io/home-assistant/haos-builder:latest
 
@@ -73,12 +74,14 @@ jobs:
           if [[ -z "${VERSIONS}" ]]; then
             echo "No new versions to build."
             echo "versions=[]" >> "$GITHUB_OUTPUT"
-          else
-            # Convert newline-separated list to a JSON array for the matrix.
-            JSON=$(printf '%s\n' ${VERSIONS} | jq -R . | jq -sc .)
-            echo "versions=${JSON}" >> "$GITHUB_OUTPUT"
-            echo "Versions to build: ${JSON}"
-          fi
+            else
+              # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS)
+              MAX_VERSIONS=${MAX_VERSIONS:-5}
+              # Convert newline-separated list to a JSON array, sort by version (desc), and take the top N.
+              JSON=$(printf '%s\n' ${VERSIONS} | sort -V -r | head -n "${MAX_VERSIONS}" | jq -R . | jq -sc .)
+              echo "versions=${JSON}" >> "$GITHUB_OUTPUT"
+              echo "Versions to build: ${JSON}"
+            fi
 
   # ---------------------------------------------------------------------------
   # Job 2 – Build kernel modules for every pending version × architecture.
@@ -122,33 +125,41 @@ jobs:
         run: |
           # HAOS stores per-arch configs under buildroot-external/configs/
           # The directory layout changed between HAOS versions; handle both.
-          CONFIG_SEARCH=(
-            "operating-system/buildroot-external/configs/rpi4_defconfig"
-            "operating-system/buildroot-external/configs/ova_defconfig"
-          )
 
+          # Derive ARCH_PATTERN by scanning defconfig files for the relevant
+          # BR2 architecture symbol, so the pattern stays in sync with
+          # whatever configs HAOS ships.
           case "${{ matrix.arch }}" in
             x86_64)
-              ARCH_PATTERN="ova\|x86_64\|generic-x86-64"
+              BR2_ARCH_SYM="BR2_x86_64=y"
               ;;
             aarch64)
-              ARCH_PATTERN="rpi4\|aarch64\|raspberrypi4-64\|odroid"
+              BR2_ARCH_SYM="BR2_aarch64=y"
               ;;
           esac
 
-          # Prefer kernel.config fragments shipped with the source tree.
-          KERNEL_CONFIG=$(find operating-system/buildroot-external \
-            -type f -name "linux*.config" \
-            | grep -i "${ARCH_PATTERN}" \
+          # Find the first defconfig that declares the target architecture.
+          DEFCONFIG=$(grep -rl "${BR2_ARCH_SYM}" \
+            operating-system/buildroot-external/configs/ \
+            --include="*_defconfig" \
             | head -1 || true)
 
-          if [[ -z "${KERNEL_CONFIG}" ]]; then
-            # Fallback: any matching defconfig
-            KERNEL_CONFIG=$(find operating-system/buildroot-external/configs \
-              -type f -name "*defconfig*" \
-              | grep -i "${ARCH_PATTERN}" \
-              | head -1 || true)
+          if [[ -z "${DEFCONFIG}" ]]; then
+            echo "[ERROR] No defconfigs found containing ${BR2_ARCH_SYM}"
+            exit 1
           fi
+
+          echo "Using defconfig: ${DEFCONFIG}"
+
+          # HAOS does not ship standalone linux*.config files.
+          # The board-specific kernel fragment is the last kernel.config entry
+          # listed in BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES inside the defconfig.
+          # Extract it and resolve $(BR2_EXTERNAL_HASSOS_PATH) to the checkout path.
+          KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES' "${DEFCONFIG}" \
+            | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/board/[^" ]+kernel\.config' \
+            | tail -1 \
+            | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
+            || true)
 
           if [[ -z "${KERNEL_CONFIG}" ]]; then
             echo "[ERROR] Could not find a kernel config for arch=${{ matrix.arch }}"
@@ -296,9 +307,8 @@ jobs:
 
             ### Included modules
             | Module | Description |
-            |--------|-------------|
+            |:--------|:-------------|
             | `xfs.ko` | XFS filesystem support |
-            | `nfs.ko` | NFS client support |
             | `nfsd.ko` | NFS server daemon |
 
             ### Architectures
