@@ -1,0 +1,314 @@
+name: Build HAOS Kernel Modules
+
+on:
+  # Run daily at 06:00 UTC to pick up new HAOS releases automatically.
+  schedule:
+    - cron: "0 6 * * *"
+
+  # Allow manual triggering from the GitHub UI.
+  workflow_dispatch:
+    inputs:
+      haos_version:
+        description: >
+          HAOS version tag to build (e.g. 13.2).
+          Leave empty to auto-detect from the latest upstream release.
+        required: false
+        default: ""
+
+  # Allow other workflows / external systems to trigger this workflow.
+  repository_dispatch:
+    types: [build-modules]
+
+# Only run one build at a time; cancel any in-progress run for the same ref.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HAOS_REPO: home-assistant/operating-system
+  THIS_REPO: ${{ github.repository }}
+  MODULES: "xfs nfs nfsd"
+  # Buildroot / cross-toolchain image used by HAOS.
+  HAOS_BUILD_IMAGE: ghcr.io/home-assistant/haos-builder:latest
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1 – Detect which HAOS versions still need to be compiled.
+  # ---------------------------------------------------------------------------
+  detect-versions:
+    name: Detect pending HAOS versions
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      versions: ${{ steps.detect.outputs.versions }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Detect versions to build
+        id: detect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -n "${{ github.event.inputs.haos_version }}" ]]; then
+            VERSIONS="${{ github.event.inputs.haos_version }}"
+          elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            VERSIONS="${{ github.event.client_payload.version }}"
+          else
+            VERSIONS=$(python3 scripts/check_releases.py \
+              --haos-repo "${HAOS_REPO}" \
+              --this-repo "${THIS_REPO}" \
+              --token     "${GITHUB_TOKEN}")
+          fi
+
+          if [[ -z "${VERSIONS}" ]]; then
+            echo "No new versions to build."
+            echo "versions=[]" >> "$GITHUB_OUTPUT"
+          else
+            # Convert newline-separated list to a JSON array for the matrix.
+            JSON=$(printf '%s\n' ${VERSIONS} | jq -R . | jq -sc .)
+            echo "versions=${JSON}" >> "$GITHUB_OUTPUT"
+            echo "Versions to build: ${JSON}"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Job 2 – Build kernel modules for every pending version × architecture.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.version }} / ${{ matrix.arch }}
+    needs: detect-versions
+    if: needs.detect-versions.outputs.versions != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
+        arch: [x86_64, aarch64]
+
+    steps:
+      - name: Checkout hasos_more_modules
+        uses: actions/checkout@v4
+
+      - name: Checkout home-assistant/operating-system @ ${{ matrix.version }}
+        uses: actions/checkout@v4
+        with:
+          repository: home-assistant/operating-system
+          ref: ${{ matrix.version }}
+          path: operating-system
+          fetch-depth: 1
+
+      # Buildroot needs a set of host packages.
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential cpio flex \
+            libelf-dev libncurses-dev libssl-dev \
+            python3 python3-jinja2 rsync unzip wget
+
+      - name: Locate kernel config for ${{ matrix.arch }}
+        id: locate-config
+        run: |
+          # HAOS stores per-arch configs under buildroot-external/configs/
+          # The directory layout changed between HAOS versions; handle both.
+          CONFIG_SEARCH=(
+            "operating-system/buildroot-external/configs/rpi4_defconfig"
+            "operating-system/buildroot-external/configs/ova_defconfig"
+          )
+
+          case "${{ matrix.arch }}" in
+            x86_64)
+              ARCH_PATTERN="ova\|x86_64\|generic-x86-64"
+              ;;
+            aarch64)
+              ARCH_PATTERN="rpi4\|aarch64\|raspberrypi4-64\|odroid"
+              ;;
+          esac
+
+          # Prefer kernel.config fragments shipped with the source tree.
+          KERNEL_CONFIG=$(find operating-system/buildroot-external \
+            -type f -name "linux*.config" \
+            | grep -i "${ARCH_PATTERN}" \
+            | head -1 || true)
+
+          if [[ -z "${KERNEL_CONFIG}" ]]; then
+            # Fallback: any matching defconfig
+            KERNEL_CONFIG=$(find operating-system/buildroot-external/configs \
+              -type f -name "*defconfig*" \
+              | grep -i "${ARCH_PATTERN}" \
+              | head -1 || true)
+          fi
+
+          if [[ -z "${KERNEL_CONFIG}" ]]; then
+            echo "[ERROR] Could not find a kernel config for arch=${{ matrix.arch }}"
+            exit 1
+          fi
+
+          echo "config=${KERNEL_CONFIG}" >> "$GITHUB_OUTPUT"
+          echo "Found kernel config: ${KERNEL_CONFIG}"
+
+      - name: Patch kernel config
+        run: |
+          bash scripts/patch_config.sh \
+            "${{ steps.locate-config.outputs.config }}" \
+            "${{ matrix.arch }}"
+
+      - name: Configure cross-compilation environment
+        id: cross-env
+        run: |
+          case "${{ matrix.arch }}" in
+            x86_64)
+              echo "CROSS_COMPILE=x86_64-linux-gnu-" >> "$GITHUB_OUTPUT"
+              echo "ARCH=x86"                         >> "$GITHUB_OUTPUT"
+              sudo apt-get install -y --no-install-recommends \
+                gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu
+              ;;
+            aarch64)
+              echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_OUTPUT"
+              echo "ARCH=arm64"                        >> "$GITHUB_OUTPUT"
+              sudo apt-get install -y --no-install-recommends \
+                gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+              ;;
+          esac
+
+      - name: Build Linux kernel modules
+        env:
+          ARCH: ${{ steps.cross-env.outputs.ARCH }}
+          CROSS_COMPILE: ${{ steps.cross-env.outputs.CROSS_COMPILE }}
+        run: |
+          # We build only the modules (no full OS/Buildroot build) to keep
+          # CI time reasonable.  This requires a configured kernel source tree.
+          LINUX_SRC=$(find operating-system -maxdepth 6 \
+            -type d -name "linux-*" \
+            | grep "build\|source" \
+            | head -1 || true)
+
+          if [[ -z "${LINUX_SRC}" ]]; then
+            echo "[INFO] No pre-built linux source found; running Buildroot" \
+                 "linux-configure + linux-build steps."
+
+            cd operating-system
+
+            # Use the patched config as the defconfig.
+            DEFCONFIG=$(find buildroot-external/configs -maxdepth 1 \
+              -name "*${{ matrix.arch }}*" -o \
+              -name "*x86*" -o \
+              -name "*aarch64*" \
+              | grep -i "$([ '${{ matrix.arch }}' = 'x86_64' ] && echo 'ova\|x86' || echo 'rpi4\|aarch64')" \
+              | head -1 || true)
+
+            if [[ -z "${DEFCONFIG}" ]]; then
+              echo "[ERROR] No defconfig found for ${{ matrix.arch }}"
+              exit 1
+            fi
+
+            make BR2_EXTERNAL=buildroot-external \
+                 "$(basename ${DEFCONFIG})" \
+                 2>&1 | tail -20
+
+            make linux-configure 2>&1 | tail -40
+            make linux-modules   2>&1 | tail -80
+
+            LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" | head -1)
+          else
+            # Source already available – just build modules.
+            make -C "${LINUX_SRC}" \
+              ARCH="${ARCH}" \
+              CROSS_COMPILE="${CROSS_COMPILE}" \
+              modules 2>&1 | tail -80
+          fi
+
+          echo "linux_src=${LINUX_SRC}" >> "$GITHUB_ENV"
+
+      - name: Extract and rename .ko files
+        run: |
+          VERSION="${{ matrix.version }}"
+          ARCH="${{ matrix.arch }}"
+          OUT_DIR="output_modules/${VERSION}/${ARCH}"
+          mkdir -p "${OUT_DIR}"
+
+          MODULE_NAMES=(xfs nfs nfsd)
+          for mod in "${MODULE_NAMES[@]}"; do
+            KO_PATH=$(find "${linux_src:-operating-system}" \
+              -type f -name "${mod}.ko" 2>/dev/null | head -1 || true)
+
+            if [[ -n "${KO_PATH}" ]]; then
+              DEST="${OUT_DIR}/${mod}_${VERSION}_${ARCH}.ko"
+              cp "${KO_PATH}" "${DEST}"
+              echo "[OK] ${DEST}"
+            else
+              echo "[WARN] ${mod}.ko not found – it may be built-in or not supported."
+            fi
+          done
+
+          echo "output_dir=${OUT_DIR}" >> "$GITHUB_ENV"
+
+      - name: Upload modules as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: modules-${{ matrix.version }}-${{ matrix.arch }}
+          path: output_modules/${{ matrix.version }}/${{ matrix.arch }}/*.ko
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Job 3 – Create a GitHub Release and attach the compiled modules.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create release ${{ matrix.version }}
+    needs: [detect-versions, build]
+    if: needs.detect-versions.outputs.versions != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all compiled artifacts for ${{ matrix.version }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: modules-${{ matrix.version }}-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List assets to be published
+        run: find release-assets -type f | sort
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.version }}
+          name: "HAOS ${{ matrix.version }} kernel modules"
+          body: |
+            Compiled out-of-tree kernel modules for **Home Assistant OS ${{ matrix.version }}**.
+
+            ### Included modules
+            | Module | Description |
+            |--------|-------------|
+            | `xfs.ko` | XFS filesystem support |
+            | `nfs.ko` | NFS client support |
+            | `nfsd.ko` | NFS server daemon |
+
+            ### Architectures
+            - `x86_64` (OVA / generic x86-64)
+            - `aarch64` (Raspberry Pi 4 / 64-bit ARM)
+
+            ### ⚠️ Kernel Version Magic
+            These modules are compiled for the **exact** kernel shipped with
+            HAOS ${{ matrix.version }}.  Loading them on a different kernel
+            version will fail.  See the README for installation instructions.
+          files: release-assets/*.ko
+          fail_on_unmatched_files: false
+          prerelease: ${{ contains(matrix.version, 'b') || contains(matrix.version, 'rc') || contains(matrix.version, 'dev') }}
