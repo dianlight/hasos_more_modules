@@ -3,12 +3,12 @@
 # compilation.
 #
 # Usage:
-#   scripts/patch_config.sh <path-to-kernel.config> [<arch>]
+#   scripts/patch_config.sh <path-to-kernel.config> [<board>]
 #
 # Arguments:
 #   <path-to-kernel.config>  Absolute or relative path to the kernel.config
 #                             file that should be patched in place.
-#   <arch>                    Target architecture (x86_64 or aarch64).
+#   <board>                   Target board name (e.g. generic_x86_64, rpi4_64).
 #                             Optional; used only for informational messages.
 #
 # The script performs the following changes:
@@ -16,7 +16,6 @@
 #   2. Ensures CONFIG_LOCALVERSION="-haos" so the kernel version string matches.
 #   3. Forces the following symbols to =m (compiled as loadable modules):
 #        CONFIG_XFS_FS
-#        CONFIG_NFS_FS
 #        CONFIG_NFSD
 #        CONFIG_NFSD_V4
 #        CONFIG_EXPORTFS
@@ -27,19 +26,19 @@ set -euo pipefail
 # Argument handling
 # ---------------------------------------------------------------------------
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <path-to-kernel.config> [<arch>]" >&2
+    echo "Usage: $0 <path-to-kernel.config> [<board>]" >&2
     exit 1
 fi
 
 CONFIG_FILE="$1"
-ARCH="${2:-unknown}"
+BOARD="${2:-unknown}"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
     echo "[ERROR] Config file not found: ${CONFIG_FILE}" >&2
     exit 1
 fi
 
-echo "[INFO] Patching kernel config: ${CONFIG_FILE} (arch=${ARCH})"
+echo "[INFO] Patching kernel config: ${CONFIG_FILE} (board=${BOARD})"
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -98,7 +97,6 @@ set_config_string "CONFIG_LOCALVERSION" "-haos"
 echo "[INFO] Step 3: Forcing filesystem modules to =m ..."
 MODULES=(
     CONFIG_XFS_FS
-    CONFIG_NFS_FS
     CONFIG_NFSD
     CONFIG_NFSD_V4
     CONFIG_EXPORTFS

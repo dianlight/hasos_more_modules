@@ -9,7 +9,6 @@ Available modules:
 | Module | Description |
 | :------- | :------------ |
 | `xfs.ko` | XFS filesystem support |
-| `nfs.ko` | NFS client (Network File System) |
 | `nfsd.ko` | NFS server daemon |
 
 Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Raspberry Pi 4 / ARM 64-bit).
@@ -132,7 +131,6 @@ HAOS updates**.
     └── <kernel-version>/
         └── extra/
             ├── xfs.ko
-            ├── nfs.ko
             └── nfsd.ko
 ```
 
@@ -160,7 +158,7 @@ depmod -a
 mount -o remount,ro /
 
 # Load modules
-for mod in xfs nfs nfsd; do
+for mod in xfs nfsd; do
     modprobe "${mod}" 2>/dev/null && \
         echo "[haos_more_modules] Module ${mod} loaded." || \
         echo "[haos_more_modules] Module ${mod} not found or already built-in."

@@ -9,7 +9,7 @@ Usage:
         --haos-repo  home-assistant/operating-system \
         --this-repo  dianlight/hasos_more_modules \
         [--token      <GITHUB_TOKEN>] \
-        [--arch       x86_64 aarch64]
+        [--board      generic_x86_64 generic_aarch64 ...]
 
 Exit codes:
     0 – at least one new version was found (the list is printed to stdout,
@@ -31,7 +31,6 @@ from typing import Any
 GITHUB_API = "https://api.github.com"
 DEFAULT_HAOS_REPO = "home-assistant/operating-system"
 DEFAULT_THIS_REPO = "dianlight/hasos_more_modules"
-DEFAULT_ARCHS = ["x86_64", "aarch64"]
 
 # How many releases to fetch per page (max allowed by GitHub API).
 PER_PAGE = 100
@@ -48,10 +47,15 @@ def _get(url: str, token: str | None) -> Any:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        print(f"[ERROR] HTTP {exc.code} while fetching {url}: {exc.reason}", file=sys.stderr)
+        print(
+            f"[ERROR] HTTP {exc.code} while fetching {url}: {exc.reason}",
+            file=sys.stderr,
+        )
         sys.exit(2)
     except urllib.error.URLError as exc:
-        print(f"[ERROR] Network error while fetching {url}: {exc.reason}", file=sys.stderr)
+        print(
+            f"[ERROR] Network error while fetching {url}: {exc.reason}", file=sys.stderr
+        )
         sys.exit(2)
 
 
@@ -63,11 +67,20 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
     return [r["tag_name"] for r in releases if r.get("tag_name")]
 
 
-def fetch_compiled_versions(this_repo: str, archs: list[str], token: str | None) -> set[str]:
+def fetch_compiled_versions(
+    this_repo: str,
+    boards: list[str] | None,
+    token: str | None,
+) -> set[str]:
     """
-    Return the set of HAOS version tags that have *all* architectures already
-    compiled.  We detect this by looking for release assets whose names match
-    the pattern ``*_{version}_{arch}.ko``.
+    Return the set of HAOS version tags that have already been compiled.
+
+    If *boards* is provided and non-empty, a version is considered compiled
+    only when at least one ``.ko`` asset matching ``_{tag}_{board}.ko`` exists
+    for **every** requested board.
+
+    If *boards* is empty or None, any release that contains at least one
+    ``.ko`` asset is treated as already compiled.
     """
     url = f"{GITHUB_API}/repos/{this_repo}/releases?per_page={PER_PAGE}"
     releases: list[dict] = _get(url, token)
@@ -78,14 +91,18 @@ def fetch_compiled_versions(this_repo: str, archs: list[str], token: str | None)
         assets: list[dict] = release.get("assets", [])
         asset_names = {a["name"] for a in assets}
 
-        # A version is considered compiled when at least one .ko for every
-        # requested architecture exists in this release.
-        arch_present = {
-            arch: any(f"_{tag}_{arch}.ko" in name for name in asset_names)
-            for arch in archs
-        }
-        if all(arch_present.values()):
-            compiled.add(tag)
+        if not boards:
+            # No board filter – any .ko file marks the version as done.
+            if any(name.endswith(".ko") for name in asset_names):
+                compiled.add(tag)
+        else:
+            # All requested boards must have at least one .ko asset present.
+            board_present = {
+                board: any(f"_{tag}_{board}.ko" in name for name in asset_names)
+                for board in boards
+            }
+            if all(board_present.values()):
+                compiled.add(tag)
 
     return compiled
 
@@ -110,11 +127,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="GitHub personal access token (or set GITHUB_TOKEN env var).",
     )
     parser.add_argument(
-        "--arch",
+        "--board",
         nargs="+",
-        default=DEFAULT_ARCHS,
-        metavar="ARCH",
-        help="Architectures to check (default: %(default)s).",
+        default=None,
+        metavar="BOARD",
+        help=(
+            "Board names to check (e.g. generic_x86_64 rpi4_64). "
+            "When omitted, any release containing a .ko asset is treated as compiled."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -131,16 +151,30 @@ def main(argv: list[str] | None = None) -> int:
         print("[WARN] No HAOS releases found.", file=sys.stderr)
         return 1
 
+    if args.board:
+        print(
+            f"[INFO] Checking compiled releases for boards: {', '.join(args.board)}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[INFO] No boards specified – checking for any compiled .ko assets.",
+            file=sys.stderr,
+        )
+
     print(
         f"[INFO] Fetching compiled releases from {args.this_repo} ...",
         file=sys.stderr,
     )
-    compiled = fetch_compiled_versions(args.this_repo, args.arch, args.token)
+    compiled = fetch_compiled_versions(args.this_repo, args.board, args.token)
 
     new_tags = [t for t in haos_tags if t not in compiled]
 
     if not new_tags:
-        print("[INFO] All HAOS releases are already compiled. Nothing to do.", file=sys.stderr)
+        print(
+            "[INFO] All HAOS releases are already compiled. Nothing to do.",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"[INFO] {len(new_tags)} new version(s) to compile:", file=sys.stderr)

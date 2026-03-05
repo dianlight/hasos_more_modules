@@ -27,17 +27,48 @@ concurrency:
 env:
   HAOS_REPO: home-assistant/operating-system
   THIS_REPO: ${{ github.repository }}
-  MODULES: "xfs nfsd"
   MAX_VERSIONS: 5
-  # Buildroot / cross-toolchain image used by HAOS.
-  HAOS_BUILD_IMAGE: ghcr.io/home-assistant/haos-builder:latest
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1 – Detect which HAOS versions still need to be compiled.
+  # Job 1 – Discover every board HAOS supports by listing its defconfig files.
+  # ---------------------------------------------------------------------------
+  detect-boards:
+    name: Detect supported HAOS boards
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      boards: ${{ steps.detect.outputs.boards }}
+    steps:
+      - name: Fetch defconfig list from HAOS repository
+        id: detect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Query the GitHub Contents API for buildroot-external/configs/
+          RESPONSE=$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${HAOS_REPO}/contents/buildroot-external/configs")
+
+          # Extract file names, keep only *_defconfig, strip the suffix.
+          BOARDS=$(echo "${RESPONSE}" \
+            | jq -r '.[].name | select(endswith("_defconfig")) | sub("_defconfig$"; "")' \
+            | sort \
+            | jq -R . \
+            | jq -sc .)
+
+          echo "boards=${BOARDS}" >> "$GITHUB_OUTPUT"
+          echo "Detected boards: ${BOARDS}"
+
+  # ---------------------------------------------------------------------------
+  # Job 2 – Detect which HAOS versions still need to be compiled.
   # ---------------------------------------------------------------------------
   detect-versions:
     name: Detect pending HAOS versions
+    needs: detect-boards
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -65,30 +96,41 @@ jobs:
           elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             VERSIONS="${{ github.event.client_payload.version }}"
           else
+            # Build --board arguments from the detected board list so the
+            # script can verify all boards are present before skipping a version.
+            BOARD_ARGS=$(echo '${{ needs.detect-boards.outputs.boards }}' \
+              | jq -r '.[] | "--board \(.)"' \
+              | tr '\n' ' ')
+
             VERSIONS=$(python3 scripts/check_releases.py \
               --haos-repo "${HAOS_REPO}" \
               --this-repo "${THIS_REPO}" \
-              --token     "${GITHUB_TOKEN}")
+              --token     "${GITHUB_TOKEN}" \
+              ${BOARD_ARGS})
           fi
 
           if [[ -z "${VERSIONS}" ]]; then
             echo "No new versions to build."
             echo "versions=[]" >> "$GITHUB_OUTPUT"
-            else
-              # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS)
-              MAX_VERSIONS=${MAX_VERSIONS:-5}
-              # Convert newline-separated list to a JSON array, sort by version (desc), and take the top N.
-              JSON=$(printf '%s\n' ${VERSIONS} | sort -V -r | head -n "${MAX_VERSIONS}" | jq -R . | jq -sc .)
-              echo "versions=${JSON}" >> "$GITHUB_OUTPUT"
-              echo "Versions to build: ${JSON}"
-            fi
+          else
+            # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS).
+            MAX_VERSIONS=${MAX_VERSIONS:-5}
+            # Convert newline-separated list to a JSON array, sort by version (desc), take top N.
+            JSON=$(printf '%s\n' ${VERSIONS} \
+              | sort -V -r \
+              | head -n "${MAX_VERSIONS}" \
+              | jq -R . \
+              | jq -sc .)
+            echo "versions=${JSON}" >> "$GITHUB_OUTPUT"
+            echo "Versions to build: ${JSON}"
+          fi
 
   # ---------------------------------------------------------------------------
-  # Job 2 – Build kernel modules for every pending version × architecture.
+  # Job 3 – Build kernel modules for every pending version × board.
   # ---------------------------------------------------------------------------
   build:
-    name: Build ${{ matrix.version }} / ${{ matrix.arch }}
-    needs: detect-versions
+    name: Build ${{ matrix.version }} / ${{ matrix.board }}
+    needs: [detect-boards, detect-versions]
     if: needs.detect-versions.outputs.versions != '[]'
     runs-on: ubuntu-24.04
     permissions:
@@ -97,7 +139,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
-        arch: [x86_64, aarch64]
+        board: ${{ fromJson(needs.detect-boards.outputs.boards) }}
 
     steps:
       - name: Checkout hasos_more_modules
@@ -120,160 +162,129 @@ jobs:
             libelf-dev libncurses-dev libssl-dev \
             python3 python3-jinja2 rsync unzip wget
 
-      - name: Locate kernel config for ${{ matrix.arch }}
+      - name: Locate kernel config for ${{ matrix.board }}
         id: locate-config
         run: |
-          # HAOS stores per-arch configs under buildroot-external/configs/
-          # The directory layout changed between HAOS versions; handle both.
+          DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
 
-          # Derive ARCH_PATTERN by scanning defconfig files for the relevant
-          # BR2 architecture symbol, so the pattern stays in sync with
-          # whatever configs HAOS ships.
-          case "${{ matrix.arch }}" in
-            x86_64)
-              BR2_ARCH_SYM="BR2_x86_64=y"
-              ;;
-            aarch64)
-              BR2_ARCH_SYM="BR2_aarch64=y"
-              ;;
-          esac
-
-          # Find the first defconfig that declares the target architecture.
-          DEFCONFIG=$(grep -rl "${BR2_ARCH_SYM}" \
-            operating-system/buildroot-external/configs/ \
-            --include="*_defconfig" \
-            | head -1 || true)
-
-          if [[ -z "${DEFCONFIG}" ]]; then
-            echo "[ERROR] No defconfigs found containing ${BR2_ARCH_SYM}"
+          if [[ ! -f "${DEFCONFIG}" ]]; then
+            echo "[ERROR] Defconfig not found: ${DEFCONFIG}"
             exit 1
           fi
 
           echo "Using defconfig: ${DEFCONFIG}"
 
-          # HAOS does not ship standalone linux*.config files.
           # The board-specific kernel fragment is the last kernel.config entry
-          # listed in BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES inside the defconfig.
-          # Extract it and resolve $(BR2_EXTERNAL_HASSOS_PATH) to the checkout path.
+          # listed in BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES.
+          # Resolve $(BR2_EXTERNAL_HASSOS_PATH) to the checkout path.
           KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES' "${DEFCONFIG}" \
-            | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/board/[^" ]+kernel\.config' \
+            | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^" ]+kernel\.config' \
             | tail -1 \
             | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
             || true)
 
           if [[ -z "${KERNEL_CONFIG}" ]]; then
-            echo "[ERROR] Could not find a kernel config for arch=${{ matrix.arch }}"
+            echo "[ERROR] Could not find a kernel config fragment in ${DEFCONFIG}"
+            exit 1
+          fi
+
+          if [[ ! -f "${KERNEL_CONFIG}" ]]; then
+            echo "[ERROR] Kernel config fragment not found on disk: ${KERNEL_CONFIG}"
             exit 1
           fi
 
           echo "config=${KERNEL_CONFIG}" >> "$GITHUB_OUTPUT"
+          echo "defconfig=${{ matrix.board }}_defconfig" >> "$GITHUB_OUTPUT"
           echo "Found kernel config: ${KERNEL_CONFIG}"
 
-      - name: Patch kernel config
+      - name: Detect architecture from defconfig
+        id: arch
+        run: |
+          DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
+
+          if grep -q '^BR2_x86_64=y' "${DEFCONFIG}"; then
+            echo "ARCH=x86"                         >> "$GITHUB_OUTPUT"
+            echo "CROSS_COMPILE=x86_64-linux-gnu-"  >> "$GITHUB_OUTPUT"
+            echo "arch_pkg=gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu" >> "$GITHUB_OUTPUT"
+          elif grep -q '^BR2_aarch64=y' "${DEFCONFIG}"; then
+            echo "ARCH=arm64"                        >> "$GITHUB_OUTPUT"
+            echo "CROSS_COMPILE=aarch64-linux-gnu-"  >> "$GITHUB_OUTPUT"
+            echo "arch_pkg=gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu" >> "$GITHUB_OUTPUT"
+          else
+            echo "[ERROR] Unknown architecture in ${{ matrix.board }}_defconfig"
+            exit 1
+          fi
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            ${{ steps.arch.outputs.arch_pkg }}
+
+      - name: Patch kernel config fragment
         run: |
           bash scripts/patch_config.sh \
             "${{ steps.locate-config.outputs.config }}" \
-            "${{ matrix.arch }}"
+            "${{ matrix.board }}"
 
-      - name: Configure cross-compilation environment
-        id: cross-env
-        run: |
-          case "${{ matrix.arch }}" in
-            x86_64)
-              echo "CROSS_COMPILE=x86_64-linux-gnu-" >> "$GITHUB_OUTPUT"
-              echo "ARCH=x86"                         >> "$GITHUB_OUTPUT"
-              sudo apt-get install -y --no-install-recommends \
-                gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu
-              ;;
-            aarch64)
-              echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_OUTPUT"
-              echo "ARCH=arm64"                        >> "$GITHUB_OUTPUT"
-              sudo apt-get install -y --no-install-recommends \
-                gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-              ;;
-          esac
-
-      - name: Build Linux kernel modules
+      - name: Configure and build Linux kernel modules
         env:
-          ARCH: ${{ steps.cross-env.outputs.ARCH }}
-          CROSS_COMPILE: ${{ steps.cross-env.outputs.CROSS_COMPILE }}
+          ARCH: ${{ steps.arch.outputs.ARCH }}
+          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
         run: |
-          # We build only the modules (no full OS/Buildroot build) to keep
-          # CI time reasonable.  This requires a configured kernel source tree.
-          LINUX_SRC=$(find operating-system -maxdepth 6 \
-            -type d -name "linux-*" \
-            | grep "build\|source" \
-            | head -1 || true)
+          cd operating-system
 
+          # Apply the board defconfig so Buildroot knows what to build.
+          make BR2_EXTERNAL=buildroot-external \
+               "${{ steps.locate-config.outputs.defconfig }}" \
+               2>&1 | tail -20
+
+          # Configure the kernel (merges all config fragments including the
+          # patched board-specific one).
+          make linux-configure 2>&1 | tail -40
+
+          # Build only the kernel modules – no full OS image.
+          make linux-modules 2>&1 | tail -80
+
+          # Record the kernel source directory for the extraction step.
+          LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" | head -1)
           if [[ -z "${LINUX_SRC}" ]]; then
-            echo "[INFO] No pre-built linux source found; running Buildroot" \
-                 "linux-configure + linux-build steps."
-
-            cd operating-system
-
-            # Use the patched config as the defconfig.
-            DEFCONFIG=$(find buildroot-external/configs -maxdepth 1 \
-              -name "*${{ matrix.arch }}*" -o \
-              -name "*x86*" -o \
-              -name "*aarch64*" \
-              | grep -i "$([ '${{ matrix.arch }}' = 'x86_64' ] && echo 'ova\|x86' || echo 'rpi4\|aarch64')" \
-              | head -1 || true)
-
-            if [[ -z "${DEFCONFIG}" ]]; then
-              echo "[ERROR] No defconfig found for ${{ matrix.arch }}"
-              exit 1
-            fi
-
-            make BR2_EXTERNAL=buildroot-external \
-                 "$(basename ${DEFCONFIG})" \
-                 2>&1 | tail -20
-
-            make linux-configure 2>&1 | tail -40
-            make linux-modules   2>&1 | tail -80
-
-            LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" | head -1)
-          else
-            # Source already available – just build modules.
-            make -C "${LINUX_SRC}" \
-              ARCH="${ARCH}" \
-              CROSS_COMPILE="${CROSS_COMPILE}" \
-              modules 2>&1 | tail -80
+            echo "[ERROR] linux source directory not found under output/build"
+            exit 1
           fi
 
-          echo "linux_src=${LINUX_SRC}" >> "$GITHUB_ENV"
+          # Store relative-to-workspace-root path.
+          echo "LINUX_SRC=operating-system/${LINUX_SRC}" >> "$GITHUB_ENV"
 
       - name: Extract and rename .ko files
         run: |
           VERSION="${{ matrix.version }}"
-          ARCH="${{ matrix.arch }}"
-          OUT_DIR="output_modules/${VERSION}/${ARCH}"
+          BOARD="${{ matrix.board }}"
+          OUT_DIR="output_modules/${VERSION}/${BOARD}"
           mkdir -p "${OUT_DIR}"
 
           MODULE_NAMES=(xfs nfs nfsd)
           for mod in "${MODULE_NAMES[@]}"; do
-            KO_PATH=$(find "${linux_src:-operating-system}" \
+            KO_PATH=$(find "${LINUX_SRC}" \
               -type f -name "${mod}.ko" 2>/dev/null | head -1 || true)
 
             if [[ -n "${KO_PATH}" ]]; then
-              DEST="${OUT_DIR}/${mod}_${VERSION}_${ARCH}.ko"
+              DEST="${OUT_DIR}/${mod}_${VERSION}_${BOARD}.ko"
               cp "${KO_PATH}" "${DEST}"
               echo "[OK] ${DEST}"
             else
-              echo "[WARN] ${mod}.ko not found – it may be built-in or not supported."
+              echo "[WARN] ${mod}.ko not found – it may be built-in or not supported on ${BOARD}."
             fi
           done
-
-          echo "output_dir=${OUT_DIR}" >> "$GITHUB_ENV"
 
       - name: Upload modules as workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: modules-${{ matrix.version }}-${{ matrix.arch }}
-          path: output_modules/${{ matrix.version }}/${{ matrix.arch }}/*.ko
+          name: modules-${{ matrix.version }}-${{ matrix.board }}
+          path: output_modules/${{ matrix.version }}/${{ matrix.board }}/*.ko
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Job 3 – Create a GitHub Release and attach the compiled modules.
+  # Job 4 – Create a GitHub Release and attach the compiled modules.
   # ---------------------------------------------------------------------------
   release:
     name: Create release ${{ matrix.version }}
@@ -304,11 +315,12 @@ jobs:
             echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
           fi
 
-
       - name: List assets to be published
+        if: steps.check-artifacts.outputs.has_artifacts == 'true'
         run: find release-assets -type f | sort
 
       - name: Create / update GitHub Release
+        if: steps.check-artifacts.outputs.has_artifacts == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.version }}
@@ -316,20 +328,23 @@ jobs:
           body: |
             Compiled out-of-tree kernel modules for **Home Assistant OS ${{ matrix.version }}**.
 
+            Artifacts are named `{module}_{haos_version}_{board}.ko`.
+
             ### Included modules
             | Module | Description |
             |:--------|:-------------|
             | `xfs.ko` | XFS filesystem support |
             | `nfsd.ko` | NFS server daemon |
+            | `nfs.ko` | NFS client support |
 
-            ### Architectures
-            - `x86_64` (OVA / generic x86-64)
-            - `aarch64` (Raspberry Pi 4 / 64-bit ARM)
+            ### Supported boards
+            One set of `.ko` files is provided per board listed below.
+            Each file is compiled against the **exact** kernel shipped with
+            HAOS ${{ matrix.version }} for that board.  Loading a module on a
+            different kernel version will fail.
 
-            ### ⚠️ Kernel Version Magic
-            These modules are compiled for the **exact** kernel shipped with
-            HAOS ${{ matrix.version }}.  Loading them on a different kernel
-            version will fail.  See the README for installation instructions.
+            See the README for installation instructions.
+
           files: release-assets/*.ko
           fail_on_unmatched_files: false
           prerelease: ${{ contains(matrix.version, 'b') || contains(matrix.version, 'rc') || contains(matrix.version, 'dev') }}
