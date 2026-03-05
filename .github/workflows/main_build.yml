@@ -265,51 +265,75 @@ jobs:
 
           # ---------------------------------------------------------------
           # Inject CI-safe overrides into output/.config BEFORE Buildroot
-          # processes it further.  These four changes are essential:
+          # processes it further.  Four groups of changes are required:
           #
-          #  1. BR2_DL_DIR / BR2_CCACHE_DIR  — the defconfigs hard-code
-          #     /cache/dl and /cache/cc which do not exist on GH runners.
+          #  1. BR2_DL_DIR / BR2_CCACHE_DIR  — defconfigs hard-code
+          #     /cache/dl and /cache/cc which don't exist on GH runners.
           #  2. BR2_CCACHE=n                 — ccache is not installed.
           #  3. Switch from the internal Buildroot toolchain
-          #     (BR2_TOOLCHAIN_BUILDROOT_CXX=y) to a pre-installed external
-          #     one (the cross-compiler installed via apt in the previous
-          #     step).  Without this Buildroot would spend hours downloading
-          #     and compiling binutils+gcc+glibc before touching the kernel.
+          #     (BR2_TOOLCHAIN_BUILDROOT_CXX=y) to a CUSTOM external one
+          #     pointing at the apt-installed cross-compiler.  We use
+          #     BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y (not PREINSTALLED) so that
+          #     Buildroot skips its sysroot / Linux-headers version checks —
+          #     the Ubuntu system GCC sysroot ships Linux 6.8 headers while
+          #     the defconfig requests 6.12, causing PREINSTALLED to abort.
+          #  4. Declare the correct kernel-headers series (6.12) and C++
+          #     support so that downstream Kconfig symbols resolve cleanly.
           # ---------------------------------------------------------------
           echo "[INFO] Patching output/.config to use external toolchain ..."
 
           # Fix download/cache directories.
-          sed -i 's|^BR2_DL_DIR=.*|BR2_DL_DIR="$(TOPDIR)/../br-dl"|'      output/.config
-          sed -i 's|^BR2_CCACHE_DIR=.*|BR2_CCACHE_DIR="$(TOPDIR)/../br-cc"|' output/.config
+          sed -i 's|^BR2_DL_DIR=.*|BR2_DL_DIR="$(TOPDIR)/../br-dl"|'         output/.config
+          sed -i 's|^BR2_CCACHE_DIR=.*|BR2_CCACHE_DIR="$(TOPDIR)/../br-cc"|'  output/.config
 
           # Disable ccache.
-          sed -i 's|^BR2_CCACHE=y|BR2_CCACHE=n|'                           output/.config
+          sed -i 's|^BR2_CCACHE=y|BR2_CCACHE=n|'                              output/.config
 
-          # Disable the internal Buildroot toolchain.
-          sed -i 's|^BR2_TOOLCHAIN_BUILDROOT=y|# BR2_TOOLCHAIN_BUILDROOT is not set|'       output/.config
+          # ---- Toolchain: remove internal buildroot toolchain symbols ----
+          sed -i 's|^BR2_TOOLCHAIN_BUILDROOT=y|# BR2_TOOLCHAIN_BUILDROOT is not set|'         output/.config
           sed -i 's|^BR2_TOOLCHAIN_BUILDROOT_CXX=y|# BR2_TOOLCHAIN_BUILDROOT_CXX is not set|' output/.config
+          # Also clear the host-linux-headers package that is only needed by
+          # the internal toolchain build; leave it unset to avoid confusion.
+          sed -i 's|^BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y|# BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12 is not set|' output/.config
 
-          # Enable the external (pre-installed) toolchain.
-          # Only append if not already present.
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL=y' output/.config || \
-            echo 'BR2_TOOLCHAIN_EXTERNAL=y' >> output/.config
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y' output/.config || \
-            echo 'BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y' >> output/.config
+          # ---- Toolchain: enable custom external toolchain ---------------
+          # BR2_TOOLCHAIN_EXTERNAL_CUSTOM skips sysroot/headers validation.
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL=y'        output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL=y'        >> output/.config
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' >> output/.config
 
-          # Point Buildroot at the system toolchain prefix.
+          # Remove PREINSTALLED if it crept in from a previous olddefconfig.
+          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y|# BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED is not set|' output/.config
+
+          # Per-architecture toolchain path (the apt packages install to
+          # /usr/bin/<triple>-gcc so the prefix is /usr).
+          TOOLCHAIN_BIN=$(dirname "$(command -v "${CROSS_COMPILE}gcc")")
+          TOOLCHAIN_EXT_PATH="${TOOLCHAIN_BIN%/bin}"   # strip trailing /bin
+          [[ -z "${TOOLCHAIN_EXT_PATH}" ]] && TOOLCHAIN_EXT_PATH="/usr"
+          echo "[INFO] BR2_TOOLCHAIN_EXTERNAL_PATH = ${TOOLCHAIN_EXT_PATH}"
+
           if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PATH=' output/.config; then
-            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PATH=.*|BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_PREFIX}\"|" output/.config
+            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PATH=.*|BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_EXT_PATH}\"|" output/.config
           else
-            echo "BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_PREFIX}\"" >> output/.config
+            echo "BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_EXT_PATH}\"" >> output/.config
           fi
 
-          # Set the C++ support flag for the external toolchain.
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CXX=y' output/.config || \
-            echo 'BR2_TOOLCHAIN_EXTERNAL_CXX=y' >> output/.config
+          # Toolchain feature flags expected by the packages selected in
+          # the defconfig (C++, kernel headers series 6.12, glibc).
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CXX=y'             output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CXX=y'             >> output/.config
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_12=y'    output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_12=y'    >> output/.config
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y'    output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y'    >> output/.config
+          # Ensure older headers-series flags are cleared to avoid conflicts.
+          for _hdr in 3_7 4_0 4_1 4_2 4_3 4_4 4_5 4_6 4_7 4_8 4_9 4_10 \
+                      4_11 4_12 4_13 4_14 4_15 4_16 4_17 4_18 4_19 4_20   \
+                      5_0 5_1 5_2 5_3 5_4 5_5 5_6 5_7 5_8 5_9 5_10        \
+                      5_11 5_12 5_13 5_14 5_15 5_16 5_17 5_18 5_19         \
+                      6_0 6_1 6_2 6_3 6_4 6_5 6_6 6_7 6_8 6_9 6_10 6_11; do
+            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_HEADERS_${_hdr}=y|# BR2_TOOLCHAIN_EXTERNAL_HEADERS_${_hdr} is not set|" output/.config
+          done
 
-          # Resolve any symbol conflicts introduced by the above changes.
+          # Resolve any remaining symbol conflicts.
           echo "[INFO] Running make olddefconfig to settle the config ..."
-          make olddefconfig 2>&1 | tail -20
+          make olddefconfig 2>&1 | tail -30
 
           echo "[INFO] Effective toolchain settings:"
           grep -E '^BR2_TOOLCHAIN' output/.config || true
