@@ -244,6 +244,8 @@ jobs:
           ARCH: ${{ steps.arch.outputs.ARCH }}
           CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
         run: |
+          set -euo pipefail
+
           cd operating-system
 
           # Apply the board defconfig so Buildroot knows what to build.
@@ -285,7 +287,10 @@ jobs:
           make linux-configure 2>&1 | tail -60
 
           # Locate the kernel source directory created by linux-configure.
-          LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" | head -1)
+          LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" \
+            ! -name "linux-headers-*" \
+            | sort -V \
+            | tail -1)
           if [[ -z "${LINUX_SRC}" ]]; then
             echo "[ERROR] linux source directory not found under output/build"
             exit 1
@@ -293,8 +298,8 @@ jobs:
 
           # Prefer Buildroot's internal cross toolchain if present.
           case "${ARCH}" in
-            arm64) MODULE_CROSS_COMPILE="output/host/bin/aarch64-buildroot-linux-gnu-" ;;
-            x86)   MODULE_CROSS_COMPILE="output/host/bin/x86_64-buildroot-linux-gnu-" ;;
+            arm64) MODULE_CROSS_COMPILE="${PWD}/output/host/bin/aarch64-buildroot-linux-gnu-" ;;
+            x86)   MODULE_CROSS_COMPILE="${PWD}/output/host/bin/x86_64-buildroot-linux-gnu-" ;;
             *)     MODULE_CROSS_COMPILE="${CROSS_COMPILE}" ;;
           esac
           if [[ ! -x "${MODULE_CROSS_COMPILE}gcc" ]]; then
