@@ -30,6 +30,8 @@ These instructions apply when working on `.github/workflows/main_build.yml` and 
    - `grep -nE "matrix:|version: \[|board: \[" /tmp/main_build_variant_17.1_generic_aarch64.yml`
 3. Dry-run the generated file:
    - `act workflow_dispatch -W /tmp/main_build_variant_17.1_generic_aarch64.yml --container-architecture linux/amd64 -P ubuntu-24.04=ghcr.io/catthehacker/ubuntu:act-24.04 --dryrun`
+4. Report results with the provided template.
+5. Run the generated file without `--dryrun` to confirm the successful execution of the specific variant.
 
 ## Reporting Template
 - Variant:

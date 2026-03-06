@@ -246,41 +246,17 @@ jobs:
         run: |
           cd operating-system
 
-          # Resolve the prefix for the system cross-compiler already installed
-          # by apt (e.g. /usr/bin/aarch64-linux-gnu-gcc → prefix /usr).
-          # Buildroot's external-toolchain wrapper needs this directory.
-          TOOLCHAIN_PREFIX="/usr"
-
-          # Determine the sysroot for the installed cross-compiler.
-          CROSS_GCC="${CROSS_COMPILE}gcc"
-          TOOLCHAIN_SYSROOT=$(${CROSS_GCC} -print-sysroot 2>/dev/null || echo "/usr")
-          echo "[INFO] Cross-compiler : ${CROSS_GCC}"
-          echo "[INFO] Toolchain prefix : ${TOOLCHAIN_PREFIX}"
-          echo "[INFO] Toolchain sysroot: ${TOOLCHAIN_SYSROOT}"
-
           # Apply the board defconfig so Buildroot knows what to build.
           make BR2_EXTERNAL=buildroot-external \
                "${{ steps.locate-config.outputs.defconfig }}" \
                2>&1 | tail -20
 
           # ---------------------------------------------------------------
-          # Inject CI-safe overrides into output/.config BEFORE Buildroot
-          # processes it further.  Four groups of changes are required:
-          #
-          #  1. BR2_DL_DIR / BR2_CCACHE_DIR  — defconfigs hard-code
-          #     /cache/dl and /cache/cc which don't exist on GH runners.
-          #  2. BR2_CCACHE=n                 — ccache is not installed.
-          #  3. Switch from the internal Buildroot toolchain
-          #     (BR2_TOOLCHAIN_BUILDROOT_CXX=y) to a CUSTOM external one
-          #     pointing at the apt-installed cross-compiler.  We use
-          #     BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y (not PREINSTALLED) so that
-          #     Buildroot skips its sysroot / Linux-headers version checks —
-          #     the Ubuntu system GCC sysroot ships Linux 6.8 headers while
-          #     the defconfig requests 6.12, causing PREINSTALLED to abort.
-          #  4. Declare the correct kernel-headers series (6.12) and C++
-          #     support so that downstream Kconfig symbols resolve cleanly.
+          # Keep Buildroot on its INTERNAL toolchain, but still apply CI-safe
+          # directory overrides. Defconfigs often reference /cache paths that
+          # are unavailable on GH runners.
           # ---------------------------------------------------------------
-          echo "[INFO] Patching output/.config to use external toolchain ..."
+          echo "[INFO] Patching output/.config for CI-safe paths (internal toolchain)..."
 
           # Fix download/cache directories.
           sed -i 's|^BR2_DL_DIR=.*|BR2_DL_DIR="$(TOPDIR)/../br-dl"|'         output/.config
@@ -289,84 +265,16 @@ jobs:
           # Disable ccache.
           sed -i 's|^BR2_CCACHE=y|BR2_CCACHE=n|'                              output/.config
 
-          # ---- Toolchain: remove internal buildroot toolchain symbols ----
-          sed -i 's|^BR2_TOOLCHAIN_BUILDROOT=y|# BR2_TOOLCHAIN_BUILDROOT is not set|'         output/.config
-          sed -i 's|^BR2_TOOLCHAIN_BUILDROOT_CXX=y|# BR2_TOOLCHAIN_BUILDROOT_CXX is not set|' output/.config
-          # Also clear the host-linux-headers package that is only needed by
-          # the internal toolchain build; leave it unset to avoid confusion.
-          sed -i 's|^BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y|# BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12 is not set|' output/.config
-
-          # ---- Toolchain: enable custom external toolchain ---------------
-          # BR2_TOOLCHAIN_EXTERNAL_CUSTOM skips sysroot/headers validation.
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL=y'        output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL=y'        >> output/.config
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' >> output/.config
-
-          # Remove PREINSTALLED if it crept in from a previous olddefconfig.
+          # Force INTERNAL Buildroot toolchain symbols and clear external ones.
+          grep -q '^BR2_TOOLCHAIN_BUILDROOT=y' output/.config || echo 'BR2_TOOLCHAIN_BUILDROOT=y' >> output/.config
+          grep -q '^BR2_TOOLCHAIN_BUILDROOT_CXX=y' output/.config || echo 'BR2_TOOLCHAIN_BUILDROOT_CXX=y' >> output/.config
+          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL=y|# BR2_TOOLCHAIN_EXTERNAL is not set|' output/.config
+          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y|# BR2_TOOLCHAIN_EXTERNAL_CUSTOM is not set|' output/.config
           sed -i 's|^BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y|# BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED is not set|' output/.config
-
-          # Per-architecture toolchain path (the apt packages install to
-          # /usr/bin/<triple>-gcc so the prefix is /usr).
-          TOOLCHAIN_BIN=$(dirname "$(command -v "${CROSS_COMPILE}gcc")")
-          TOOLCHAIN_EXT_PATH="${TOOLCHAIN_BIN%/bin}"   # strip trailing /bin
-          [[ -z "${TOOLCHAIN_EXT_PATH}" ]] && TOOLCHAIN_EXT_PATH="/usr"
-          echo "[INFO] BR2_TOOLCHAIN_EXTERNAL_PATH = ${TOOLCHAIN_EXT_PATH}"
-
-          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PATH=' output/.config; then
-            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PATH=.*|BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_EXT_PATH}\"|" output/.config
-          else
-            echo "BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_EXT_PATH}\"" >> output/.config
-          fi
-
-          # Set the compiler prefix to match the apt-installed cross-compiler.
-          # Buildroot defaults to "<arch>-linux" (e.g. "aarch64-linux") but apt
-          # installs "aarch64-linux-gnu-gcc", so we must override the prefix.
-          CROSS_PREFIX="${CROSS_COMPILE%-}"   # strip trailing dash
-          # For CUSTOM external toolchains Buildroot uses
-          # BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX; set both symbols defensively.
-          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PREFIX=' output/.config; then
-            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
-          else
-            echo "BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
-          fi
-          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=' output/.config; then
-            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
-          else
-            echo "BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
-          fi
-
-          # Toolchain feature flags expected by the packages selected in
-          # the defconfig (C++, kernel headers series 6.12, glibc).
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CXX=y'             output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CXX=y'             >> output/.config
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_12=y'    output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_12=y'    >> output/.config
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y'    output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y'    >> output/.config
-          # Ensure older headers-series flags are cleared to avoid conflicts.
-          for _hdr in 3_7 4_0 4_1 4_2 4_3 4_4 4_5 4_6 4_7 4_8 4_9 4_10 \
-                      4_11 4_12 4_13 4_14 4_15 4_16 4_17 4_18 4_19 4_20   \
-                      5_0 5_1 5_2 5_3 5_4 5_5 5_6 5_7 5_8 5_9 5_10        \
-                      5_11 5_12 5_13 5_14 5_15 5_16 5_17 5_18 5_19         \
-                      6_0 6_1 6_2 6_3 6_4 6_5 6_6 6_7 6_8 6_9 6_10 6_11; do
-            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_HEADERS_${_hdr}=y|# BR2_TOOLCHAIN_EXTERNAL_HEADERS_${_hdr} is not set|" output/.config
-          done
 
           # Resolve any remaining symbol conflicts.
           echo "[INFO] Running make olddefconfig to settle the config ..."
           make olddefconfig 2>&1 | tail -30
-
-          # olddefconfig may restore defaults from defconfig fragments
-          # (e.g. EXTERNAL_PREINSTALLED and prefix="$(ARCH)-linux").
-          # Force the CI-required custom external toolchain selection again.
-          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y|# BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED is not set|' output/.config
-          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' >> output/.config
-          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PREFIX=' output/.config; then
-            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
-          else
-            echo "BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
-          fi
-          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=' output/.config; then
-            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
-          else
-            echo "BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
-          fi
 
           echo "[INFO] Effective toolchain settings:"
           grep -E '^BR2_TOOLCHAIN' output/.config || true
@@ -383,13 +291,24 @@ jobs:
             exit 1
           fi
 
+          # Prefer Buildroot's internal cross toolchain if present.
+          case "${ARCH}" in
+            arm64) MODULE_CROSS_COMPILE="output/host/bin/aarch64-buildroot-linux-gnu-" ;;
+            x86)   MODULE_CROSS_COMPILE="output/host/bin/x86_64-buildroot-linux-gnu-" ;;
+            *)     MODULE_CROSS_COMPILE="${CROSS_COMPILE}" ;;
+          esac
+          if [[ ! -x "${MODULE_CROSS_COMPILE}gcc" ]]; then
+            MODULE_CROSS_COMPILE="${CROSS_COMPILE}"
+          fi
+          echo "[INFO] Module build CROSS_COMPILE=${MODULE_CROSS_COMPILE}"
+
           # Build only the kernel modules using the kernel's own Makefile.
           # Buildroot does not expose a 'linux-modules' phony target, so we
           # invoke the kernel build system directly.
           echo "[INFO] Building kernel modules in ${LINUX_SRC} ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
-            CROSS_COMPILE="${CROSS_COMPILE}" \
+            CROSS_COMPILE="${MODULE_CROSS_COMPILE}" \
             modules \
             2>&1 | tail -100
 
