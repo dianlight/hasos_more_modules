@@ -6,10 +6,10 @@ Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled
 
 Available modules:
 
-| Module | Description |
-| :------- | :------------ |
-| `xfs.ko` | XFS filesystem support |
-| `nfsd.ko` | NFS server daemon |
+| Module    | Description            |
+| :-------- | :--------------------- |
+| `xfs.ko`  | XFS filesystem support |
+| `nfsd.ko` | NFS server daemon      |
 
 Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Raspberry Pi 4 / ARM 64-bit).
 
@@ -17,12 +17,27 @@ Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Rasp
 
 ## Table of Contents
 
-1. [How the project works](#how-the-project-works)
-2. [Installing modules on HAOS](#installing-modules-on-haos)
-3. [Making modules persistent](#making-modules-persistent)
-4. [Warning about Kernel Version Magic](#warning-about-kernel-version-magic)
-5. [Local development](#local-development)
-6. [Repository structure](#repository-structure)
+- [hasos\_more\_modules](#hasos_more_modules)
+  - [Table of Contents](#table-of-contents)
+  - [How the project works](#how-the-project-works)
+  - [Installing modules on HAOS](#installing-modules-on-haos)
+    - [Prerequisites](#prerequisites)
+    - [Step 1 – Download the module](#step-1--download-the-module)
+    - [Step 2 – Upload the module to the system](#step-2--upload-the-module-to-the-system)
+    - [Step 3 – Remount `/` as read-write](#step-3--remount--as-read-write)
+    - [Step 4 – Load the module](#step-4--load-the-module)
+  - [Making modules persistent](#making-modules-persistent)
+    - [Directory structure](#directory-structure)
+    - [Startup script](#startup-script)
+    - [Integration with containers (Advanced SSH \& Web Terminal Add-on)](#integration-with-containers-advanced-ssh--web-terminal-add-on)
+  - [Warning about Kernel Version Magic](#warning-about-kernel-version-magic)
+  - [Local development](#local-development)
+    - [Requirements](#requirements)
+    - [Check for missing releases](#check-for-missing-releases)
+    - [Test the configuration patch](#test-the-configuration-patch)
+  - [Testing a specific workflow variant locally](#testing-a-specific-workflow-variant-locally)
+  - [Repository structure](#repository-structure)
+  - [License](#license)
 
 ---
 
@@ -197,10 +212,10 @@ ERROR: could not insert module xfs.ko: Invalid module format
 
 **Practical implications:**
 
-| Situation | Result |
-| :---------- | :------- |
-| Module compiled for HAOS 13.2, running on HAOS 13.2 | ✅ Works |
-| Module compiled for HAOS 13.2, running on HAOS 13.1 | ❌ Fails |
+| Situation                                                       | Result  |
+| :-------------------------------------------------------------- | :------ |
+| Module compiled for HAOS 13.2, running on HAOS 13.2             | ✅ Works |
+| Module compiled for HAOS 13.2, running on HAOS 13.1             | ❌ Fails |
 | Module compiled for HAOS 13.2, running after an upgrade to 13.3 | ❌ Fails |
 
 **Solution:** always download the module that matches **exactly** the installed
@@ -238,6 +253,13 @@ bash scripts/patch_config.sh /tmp/test.config x86_64
 grep -E "CONFIG_MODULES|CONFIG_LOCALVERSION|CONFIG_XFS|CONFIG_NFS|CONFIG_EXPORTFS" \
     /tmp/test.config
 ```
+
+## Testing a specific workflow variant locally
+
+For reproducible local simulation of one workflow variant (for example one
+`version` + `board` matrix entry), see:
+
+- [`docs/testing-specific-variant.md`](docs/testing-specific-variant.md)
 
 ---
 
