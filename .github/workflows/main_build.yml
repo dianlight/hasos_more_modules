@@ -27,7 +27,7 @@ concurrency:
 env:
   HAOS_REPO: home-assistant/operating-system
   THIS_REPO: ${{ github.repository }}
-  MAX_VERSIONS: 5
+  MAX_VERSIONS: 1 # (Optional) Limit the number of versions to build in one run to avoid overloading CI.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -321,10 +321,17 @@ jobs:
           # Buildroot defaults to "<arch>-linux" (e.g. "aarch64-linux") but apt
           # installs "aarch64-linux-gnu-gcc", so we must override the prefix.
           CROSS_PREFIX="${CROSS_COMPILE%-}"   # strip trailing dash
+          # For CUSTOM external toolchains Buildroot uses
+          # BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX; set both symbols defensively.
           if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PREFIX=' output/.config; then
             sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
           else
             echo "BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
+          fi
+          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=' output/.config; then
+            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
+          else
+            echo "BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
           fi
 
           # Toolchain feature flags expected by the packages selected in
@@ -344,6 +351,22 @@ jobs:
           # Resolve any remaining symbol conflicts.
           echo "[INFO] Running make olddefconfig to settle the config ..."
           make olddefconfig 2>&1 | tail -30
+
+          # olddefconfig may restore defaults from defconfig fragments
+          # (e.g. EXTERNAL_PREINSTALLED and prefix="$(ARCH)-linux").
+          # Force the CI-required custom external toolchain selection again.
+          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y|# BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED is not set|' output/.config
+          grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' >> output/.config
+          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PREFIX=' output/.config; then
+            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
+          else
+            echo "BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
+          fi
+          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=' output/.config; then
+            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
+          else
+            echo "BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
+          fi
 
           echo "[INFO] Effective toolchain settings:"
           grep -E '^BR2_TOOLCHAIN' output/.config || true
