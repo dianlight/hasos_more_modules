@@ -317,6 +317,16 @@ jobs:
             echo "BR2_TOOLCHAIN_EXTERNAL_PATH=\"${TOOLCHAIN_EXT_PATH}\"" >> output/.config
           fi
 
+          # Set the compiler prefix to match the apt-installed cross-compiler.
+          # Buildroot defaults to "<arch>-linux" (e.g. "aarch64-linux") but apt
+          # installs "aarch64-linux-gnu-gcc", so we must override the prefix.
+          CROSS_PREFIX="${CROSS_COMPILE%-}"   # strip trailing dash
+          if grep -q '^BR2_TOOLCHAIN_EXTERNAL_PREFIX=' output/.config; then
+            sed -i "s|^BR2_TOOLCHAIN_EXTERNAL_PREFIX=.*|BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"|" output/.config
+          else
+            echo "BR2_TOOLCHAIN_EXTERNAL_PREFIX=\"${CROSS_PREFIX}\"" >> output/.config
+          fi
+
           # Toolchain feature flags expected by the packages selected in
           # the defconfig (C++, kernel headers series 6.12, glibc).
           grep -q '^BR2_TOOLCHAIN_EXTERNAL_CXX=y'             output/.config || echo 'BR2_TOOLCHAIN_EXTERNAL_CXX=y'             >> output/.config
@@ -343,18 +353,24 @@ jobs:
           echo "[INFO] Running make linux-configure ..."
           make linux-configure 2>&1 | tail -60
 
-          # Build only the kernel modules – no full OS image.
-          echo "[INFO] Running make linux-modules ..."
-          make linux-modules 2>&1 | tail -100
-
-          # Record the kernel source directory for the extraction step.
+          # Locate the kernel source directory created by linux-configure.
           LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" | head -1)
           if [[ -z "${LINUX_SRC}" ]]; then
             echo "[ERROR] linux source directory not found under output/build"
             exit 1
           fi
 
-          # Store relative-to-workspace-root path.
+          # Build only the kernel modules using the kernel's own Makefile.
+          # Buildroot does not expose a 'linux-modules' phony target, so we
+          # invoke the kernel build system directly.
+          echo "[INFO] Building kernel modules in ${LINUX_SRC} ..."
+          make -C "${LINUX_SRC}" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            modules \
+            2>&1 | tail -100
+
+          # Store relative-to-workspace-root path for the extraction step.
           echo "LINUX_SRC=operating-system/${LINUX_SRC}" >> "$GITHUB_ENV"
 
       - name: Extract and rename .ko files
