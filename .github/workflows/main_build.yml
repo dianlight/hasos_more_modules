@@ -341,6 +341,20 @@ jobs:
             fi
           done
 
+      - name: Fail if no modules were produced
+        run: |
+          VERSION="${{ matrix.version }}"
+          BOARD="${{ matrix.board }}"
+          OUT_DIR="output_modules/${VERSION}/${BOARD}"
+
+          COUNT=$(find "${OUT_DIR}" -maxdepth 1 -type f -name '*.ko' | wc -l)
+          if [[ "${COUNT}" -eq 0 ]]; then
+            echo "[ERROR] No .ko modules were produced for ${VERSION}/${BOARD}."
+            exit 1
+          fi
+
+          echo "[INFO] Produced ${COUNT} module(s) for ${VERSION}/${BOARD}."
+
       - name: Upload modules as workflow artifacts
         uses: actions/upload-artifact@v4
         with:
