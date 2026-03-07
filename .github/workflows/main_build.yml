@@ -286,11 +286,20 @@ jobs:
           echo "[INFO] Running make linux-configure ..."
           make linux-configure 2>&1 | tail -60
 
-          # Locate the kernel source directory created by linux-configure.
-          LINUX_SRC=$(find output/build -maxdepth 1 -type d -name "linux-*" \
-            ! -name "linux-headers-*" \
-            | sort -V \
-            | tail -1)
+          # Locate the real kernel source directory created by linux-configure.
+          # Exclude helper trees like linux-headers and linux-firmware.
+          LINUX_SRC=""
+          while IFS= read -r CANDIDATE; do
+            if [[ -f "${CANDIDATE}/Makefile" && -f "${CANDIDATE}/.config" ]]; then
+              LINUX_SRC="${CANDIDATE}"
+            fi
+          done < <(
+            find output/build -maxdepth 1 -type d -name "linux-*" \
+              ! -name "linux-headers-*" \
+              ! -name "linux-firmware-*" \
+              | sort -V
+          )
+
           if [[ -z "${LINUX_SRC}" ]]; then
             echo "[ERROR] linux source directory not found under output/build"
             exit 1
