@@ -322,6 +322,7 @@ jobs:
           echo "[INFO] Building kernel modules in ${LINUX_SRC} ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
+            KBUILD_MODPOST_WARN=1 \
             CROSS_COMPILE="${MODULE_CROSS_COMPILE}" \
             modules \
             2>&1 | tail -100
