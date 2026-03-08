@@ -366,7 +366,7 @@ jobs:
           echo "[INFO] Produced ${COUNT} module(s) for ${VERSION}/${BOARD}."
 
       - name: Upload modules as workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: modules-${{ matrix.version }}-${{ matrix.board }}
           path: output_modules/${{ matrix.version }}/${{ matrix.board }}/*.ko
@@ -388,7 +388,7 @@ jobs:
 
     steps:
       - name: Download all compiled artifacts for ${{ matrix.version }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: modules-${{ matrix.version }}-*
           path: release-assets
