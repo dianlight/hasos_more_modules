@@ -1,17 +1,30 @@
 # hasos_more_modules
 
 > **Note:** this project is community-maintained and is not affiliated with Nabu Casa / official Home Assistant.
+> 
+> **Warning:** installing custom kernel modules on HAOS is **unsupported** and may lead to system instability or security issues. Use at your own risk.
+> 
+> **Alert:** the modules provided by this project are compiled with the same configuration as the official HAOS releases, but they are **not** signed with the HAOS private key. This means that they can be loaded on HAOS, but they will not be loaded automatically at boot and may require manual intervention to load.
+> 
+> **Disclaimer:** the modules provided by this project are intended for advanced users who understand the risks and implications of installing custom kernel modules on HAOS. The maintainers of this project are not responsible for any issues that may arise from using these modules.
+> 
+> **Very Big Alert:** the project is created and maintained with a heavy use of AI tools (GitHub Copilot, ChatGPT, etc.) to automate the generation of code and documentation. While this allows for rapid development and updates, it may also introduce errors or inconsistencies. Users are encouraged to review the code and documentation carefully before use.
 
 Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled for every new release.
 
 Available modules:
 
+The table below is generated from `config/modules.yml`.
+
+<!-- modules-table:start -->
 | Module    | Description            |
 | :-------- | :--------------------- |
 | `xfs.ko`  | XFS filesystem support |
 | `nfsd.ko` | NFS server daemon      |
+| `nfs.ko`  | NFS client support     |
+<!-- modules-table:end -->
 
-Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Raspberry Pi 4 / ARM 64-bit).
+Supported architectures: **x86_64** and **aarch64**.
 
 ---
 
@@ -19,8 +32,9 @@ Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Rasp
 
 - [hasos\_more\_modules](#hasos_more_modules)
   - [Table of Contents](#table-of-contents)
+  - [Scope of the project](#scope-of-the-project)
   - [How the project works](#how-the-project-works)
-  - [Installing modules on HAOS](#installing-modules-on-haos)
+  - [Installing modules on HAOS (Unsupported)](#installing-modules-on-haos-unsupported)
     - [Prerequisites](#prerequisites)
     - [Step 1 – Download the module](#step-1--download-the-module)
     - [Step 2 – Upload the module to the system](#step-2--upload-the-module-to-the-system)
@@ -34,12 +48,22 @@ Supported architectures: **x86_64** (OVA / generic x86-64) and **aarch64** (Rasp
   - [Local development](#local-development)
     - [Requirements](#requirements)
     - [Check for missing releases](#check-for-missing-releases)
+    - [Define new modules and CONFIG\_\* symbols](#define-new-modules-and-config_-symbols)
     - [Test the configuration patch](#test-the-configuration-patch)
+    - [Regenerate README module table](#regenerate-readme-module-table)
   - [Testing a specific workflow variant locally](#testing-a-specific-workflow-variant-locally)
   - [Repository structure](#repository-structure)
   - [License](#license)
 
 ---
+
+## Scope of the project
+
+This project provides **pre-compiled kernel modules** for Home Assistant OS (HAOS) that are not included in the official HAOS releases. The modules are compiled for each HAOS release and made available as assets in the GitHub Releases of this repository.
+
+The primary use is by [SambaNAS2](https://github.com/dianlight/hassio-addons) app (add-on) to provide support for the XFS filesystem and NFS server/client capabilities on HAOS. However, the modules can be used for any purpose that requires them.
+
+**Warning:** installing custom kernel modules on HAOS is **unsupported** and may lead to system instability or security issues. Use at your own risk.
 
 ## How the project works
 
@@ -72,7 +96,7 @@ The workflow runs:
 
 ---
 
-## Installing modules on HAOS
+## Installing modules on HAOS (Unsupported)
 
 ### Prerequisites
 
@@ -241,6 +265,12 @@ python3 scripts/check_releases.py \
     --this-repo dianlight/hasos_more_modules
 ```
 
+### Define new modules and CONFIG_* symbols
+
+To add a new module to the workflow, edit the `config/modules.yml` file and
+add the module name, description and the corresponding `CONFIG_*` symbol to
+enable it in the kernel configuration.
+
 ### Test the configuration patch
 
 ```bash
@@ -252,6 +282,12 @@ bash scripts/patch_config.sh /tmp/test.config x86_64
 # Verify the patched values
 grep -E "CONFIG_MODULES|CONFIG_LOCALVERSION|CONFIG_XFS|CONFIG_NFS|CONFIG_EXPORTFS" \
     /tmp/test.config
+```
+
+### Regenerate README module table
+
+```bash
+python3 scripts/update_readme_modules.py
 ```
 
 ## Testing a specific workflow variant locally
@@ -270,9 +306,13 @@ hasos_more_modules/
 ├── .github/
 │   └── workflows/
 │       └── main_build.yml      # Main CI/CD workflow
+├── config/
+│   └── modules.yml              # Single source of truth for modules and CONFIG_* symbols
 ├── scripts/
 │   ├── check_releases.py       # HAOS missing-release detection
-│   └── patch_config.sh         # kernel.config patch
+│   ├── modules_config.py       # Reads config/modules.yml for CI/docs
+│   ├── patch_config.sh         # kernel.config patch (YAML-driven)
+│   └── update_readme_modules.py # Regenerates README module table
 ├── .gitignore
 ├── LICENSE
 ├── README.md                   # This file

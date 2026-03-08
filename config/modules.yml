@@ -1,0 +1,33 @@
+{
+  "base_configs":
+    [
+      { "symbol": "CONFIG_MODULES", "value": "y" },
+      { "symbol": "CONFIG_LOCALVERSION", "type": "string", "value": "-haos" },
+    ],
+  "modules":
+    [
+      {
+        "name": "xfs",
+        "artifact": "xfs.ko",
+        "description": "XFS filesystem support",
+        "configs": [{ "symbol": "CONFIG_XFS_FS", "value": "m" }],
+      },
+      {
+        "name": "nfsd",
+        "artifact": "nfsd.ko",
+        "description": "NFS server daemon",
+        "configs":
+          [
+            { "symbol": "CONFIG_NFSD", "value": "m" },
+            { "symbol": "CONFIG_NFSD_V4", "value": "y" },
+            { "symbol": "CONFIG_EXPORTFS", "value": "m" },
+          ],
+      },
+      {
+        "name": "nfs",
+        "artifact": "nfs.ko",
+        "description": "NFS client support",
+        "configs": [{ "symbol": "CONFIG_NFS_FS", "value": "m" }],
+      },
+    ],
+}

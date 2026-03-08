@@ -210,6 +210,26 @@ jobs:
           echo "defconfig=${{ matrix.board }}_defconfig" >> "$GITHUB_OUTPUT"
           echo "Found kernel config: ${KERNEL_CONFIG}"
 
+      # - name: Check if config patching and define real config symbols are needed
+      #   id: check-patching
+      #   run: |
+      #     # Check if the config has already values from config/modules.yml, which would indicate that patching is not needed.
+      #     # The rule is if a CONFIG_* symbol from config/modules.yml is already set to 'm' or 'y', then we assume the config is already patched.
+      #     # This allows us to skip patching and compiling for modules already included in the config, which is common for newer HAOS versions that may have added support for some of our modules.
+      #     MODULE_SYMBOLS=$(python3 scripts/modules_config.py module-symbols)
+      #     if [[ -z "${MODULE_SYMBOLS}" ]]; then
+      #       echo "[ERROR] No module symbols found in config/modules.yml"
+      #       exit 1
+      #     fi
+      #     for sym in ${MODULE_SYMBOLS}; do
+      #       if grep -qE "^\s*${sym}=(m|y)" "${{ steps.locate-config.outputs.config }}"; then
+      #         echo "[INFO] Found ${sym} already set in config; skipping patching and build for this module."
+      #         echo "needs_patching=false" >> "$GITHUB_OUTPUT"
+      #         exit 0
+      #       fi
+      #     done
+      #     echo "needs_patching=true" >> "$GITHUB_OUTPUT"
+
       - name: Detect architecture from defconfig
         id: arch
         run: |
@@ -337,7 +357,12 @@ jobs:
           OUT_DIR="output_modules/${VERSION}/${BOARD}"
           mkdir -p "${OUT_DIR}"
 
-          MODULE_NAMES=(xfs nfs nfsd)
+          mapfile -t MODULE_NAMES < <(python3 scripts/modules_config.py module-names)
+          if [[ ${#MODULE_NAMES[@]} -eq 0 ]]; then
+            echo "[ERROR] No modules found in config/modules.yml"
+            exit 1
+          fi
+
           for mod in "${MODULE_NAMES[@]}"; do
             KO_PATH=$(find "${LINUX_SRC}" \
               -type f -name "${mod}.ko" 2>/dev/null | head -1 || true)
@@ -408,31 +433,21 @@ jobs:
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
         run: find release-assets -type f | sort
 
+      - name: Render release body from config/modules.yml
+        if: steps.check-artifacts.outputs.has_artifacts == 'true'
+        run: |
+          python3 scripts/modules_config.py \
+            release-body \
+            --version "${{ matrix.version }}" \
+            --output release-body.md
+
       - name: Create / update GitHub Release
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.version }}
           name: "HAOS ${{ matrix.version }} kernel modules"
-          body: |
-            Compiled out-of-tree kernel modules for **Home Assistant OS ${{ matrix.version }}**.
-
-            Artifacts are named `{module}_{haos_version}_{board}.ko`.
-
-            ### Included modules
-            | Module | Description |
-            |:--------|:-------------|
-            | `xfs.ko` | XFS filesystem support |
-            | `nfsd.ko` | NFS server daemon |
-            | `nfs.ko` | NFS client support |
-
-            ### Supported boards
-            One set of `.ko` files is provided per board listed below.
-            Each file is compiled against the **exact** kernel shipped with
-            HAOS ${{ matrix.version }} for that board.  Loading a module on a
-            different kernel version will fail.
-
-            See the README for installation instructions.
+          body_path: release-body.md
 
           files: release-assets/*.ko
           fail_on_unmatched_files: false

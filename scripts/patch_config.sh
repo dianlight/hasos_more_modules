@@ -3,22 +3,18 @@
 # compilation.
 #
 # Usage:
-#   scripts/patch_config.sh <path-to-kernel.config> [<board>]
+#   scripts/patch_config.sh <path-to-kernel.config> [<board>] [<modules-config>]
 #
 # Arguments:
 #   <path-to-kernel.config>  Absolute or relative path to the kernel.config
 #                             file that should be patched in place.
 #   <board>                   Target board name (e.g. generic_x86_64, rpi4_64).
 #                             Optional; used only for informational messages.
+#   <modules-config>          Path to module/config definition file.
+#                             Optional; defaults to config/modules.yml.
 #
-# The script performs the following changes:
-#   1. Ensures CONFIG_MODULES=y (loadable module support is required).
-#   2. Ensures CONFIG_LOCALVERSION="-haos" so the kernel version string matches.
-#   3. Forces the following symbols to =m (compiled as loadable modules):
-#        CONFIG_XFS_FS
-#        CONFIG_NFSD
-#        CONFIG_NFSD_V4
-#        CONFIG_EXPORTFS
+# The script loads all CONFIG_* assignments from config/modules.yml and applies
+# them to the selected kernel.config file.
 
 set -euo pipefail
 
@@ -26,61 +22,42 @@ set -euo pipefail
 # Argument handling
 # ---------------------------------------------------------------------------
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <path-to-kernel.config> [<board>]" >&2
+    echo "Usage: $0 <path-to-kernel.config> [<board>] [<modules-config>]" >&2
     exit 1
 fi
 
 CONFIG_FILE="$1"
 BOARD="${2:-unknown}"
+MODULES_CONFIG="${3:-config/modules.yml}"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
     echo "[ERROR] Config file not found: ${CONFIG_FILE}" >&2
     exit 1
 fi
 
+if [[ ! -f "${MODULES_CONFIG}" ]]; then
+    echo "[ERROR] Modules config file not found: ${MODULES_CONFIG}" >&2
+    exit 1
+fi
+
 echo "[INFO] Patching kernel config: ${CONFIG_FILE} (board=${BOARD})"
+echo "[INFO] Using module config: ${MODULES_CONFIG}"
 
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 
-# set_config_y <symbol>
-#   Ensures <symbol>=y is present; replaces any existing assignment.
-set_config_y() {
-    local sym="$1"
-    if grep -qE "^${sym}=" "${CONFIG_FILE}"; then
-        sed -i "s|^${sym}=.*|${sym}=y|" "${CONFIG_FILE}"
-    elif grep -qE "^# ${sym} is not set" "${CONFIG_FILE}"; then
-        sed -i "s|^# ${sym} is not set|${sym}=y|" "${CONFIG_FILE}"
-    else
-        echo "${sym}=y" >> "${CONFIG_FILE}"
-    fi
-}
-
-# set_config_m <symbol>
-#   Ensures <symbol>=m is present; replaces any existing assignment.
-set_config_m() {
-    local sym="$1"
-    if grep -qE "^${sym}=" "${CONFIG_FILE}"; then
-        sed -i "s|^${sym}=.*|${sym}=m|" "${CONFIG_FILE}"
-    elif grep -qE "^# ${sym} is not set" "${CONFIG_FILE}"; then
-        sed -i "s|^# ${sym} is not set|${sym}=m|" "${CONFIG_FILE}"
-    else
-        echo "${sym}=m" >> "${CONFIG_FILE}"
-    fi
-}
-
-# set_config_string <symbol> <value>
-#   Ensures <symbol>="<value>" is present; replaces any existing assignment.
-set_config_string() {
+# set_config_value <symbol> <value>
+#   Ensures <symbol>=<value> is present; replaces any existing assignment.
+set_config_value() {
     local sym="$1"
     local val="$2"
     if grep -qE "^${sym}=" "${CONFIG_FILE}"; then
-        sed -i "s|^${sym}=.*|${sym}=\"${val}\"|" "${CONFIG_FILE}"
+        sed -i "s|^${sym}=.*|${sym}=${val}|" "${CONFIG_FILE}"
     elif grep -qE "^# ${sym} is not set" "${CONFIG_FILE}"; then
-        sed -i "s|^# ${sym} is not set|${sym}=\"${val}\"|" "${CONFIG_FILE}"
+        sed -i "s|^# ${sym} is not set|${sym}=${val}|" "${CONFIG_FILE}"
     else
-        echo "${sym}=\"${val}\"" >> "${CONFIG_FILE}"
+        echo "${sym}=${val}" >> "${CONFIG_FILE}"
     fi
 }
 
@@ -88,22 +65,26 @@ set_config_string() {
 # Apply patches
 # ---------------------------------------------------------------------------
 
-echo "[INFO] Step 1: Ensuring CONFIG_MODULES=y ..."
-set_config_y "CONFIG_MODULES"
+echo "[INFO] Applying configured symbols ..."
+ASSIGNMENTS_JSON=$(python3 scripts/modules_config.py --config "${MODULES_CONFIG}" config-assignments-json)
+mapfile -t ASSIGNMENTS < <(echo "${ASSIGNMENTS_JSON}" | jq -r '.[] | "\(.symbol)|\(.type)|\(.value)"')
 
-echo "[INFO] Step 2: Ensuring CONFIG_LOCALVERSION=\"-haos\" ..."
-set_config_string "CONFIG_LOCALVERSION" "-haos"
+if [[ ${#ASSIGNMENTS[@]} -eq 0 ]]; then
+    echo "[ERROR] No CONFIG_* assignments found in ${MODULES_CONFIG}" >&2
+    exit 1
+fi
 
-echo "[INFO] Step 3: Forcing filesystem modules to =m ..."
-MODULES=(
-    CONFIG_XFS_FS
-    CONFIG_NFSD
-    CONFIG_NFSD_V4
-    CONFIG_EXPORTFS
-)
-for sym in "${MODULES[@]}"; do
-    echo "  [m] ${sym}"
-    set_config_m "${sym}"
+PATCHED_SYMBOLS=()
+for entry in "${ASSIGNMENTS[@]}"; do
+    IFS='|' read -r sym value_type value <<< "${entry}"
+    if [[ "${value_type}" == "string" ]]; then
+        rendered_value="\"${value}\""
+    else
+        rendered_value="${value}"
+    fi
+    echo "  [set] ${sym}=${rendered_value}"
+    set_config_value "${sym}" "${rendered_value}"
+    PATCHED_SYMBOLS+=("${sym}")
 done
 
 echo "[INFO] Patch complete."
@@ -113,7 +94,7 @@ echo "[INFO] Patch complete."
 # ---------------------------------------------------------------------------
 echo ""
 echo "[INFO] Patched configuration summary:"
-for sym in CONFIG_MODULES CONFIG_LOCALVERSION "${MODULES[@]}"; do
+for sym in "${PATCHED_SYMBOLS[@]}"; do
     value=$(grep -E "^${sym}=" "${CONFIG_FILE}" 2>/dev/null || echo "# ${sym} not found")
     echo "  ${value}"
 done
