@@ -399,11 +399,24 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Compress release assets with xz
+        run: |
+          shopt -s nullglob
+          FILES=(release-assets/*.ko)
+          if [[ ${#FILES[@]} -eq 0 ]]; then
+            echo "No .ko files found to compress for ${{ matrix.version }}."
+            exit 0
+          fi
+
+          for file in "${FILES[@]}"; do
+            xz -z -f "$file"
+          done
+
       - name: Check that at least one artifact was downloaded
         id: check-artifacts
         run: |
-          if [[ -z "$(find release-assets -type f -name '*.ko' 2>/dev/null | head -1)" ]]; then
-            echo "No .ko artifacts found for ${{ matrix.version }} – skipping release."
+          if [[ -z "$(find release-assets -type f -name '*.ko.xz' 2>/dev/null | head -1)" ]]; then
+            echo "No .ko.xz artifacts found for ${{ matrix.version }} – skipping release."
             echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
@@ -429,6 +442,6 @@ jobs:
           name: "HAOS ${{ matrix.version }} kernel modules"
           body_path: release-body.md
 
-          files: release-assets/*.ko
+          files: release-assets/*.ko.xz
           fail_on_unmatched_files: false
           prerelease: ${{ contains(matrix.version, 'b') || contains(matrix.version, 'rc') || contains(matrix.version, 'dev') }}
