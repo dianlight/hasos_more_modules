@@ -76,7 +76,7 @@ jobs:
       versions: ${{ steps.detect.outputs.versions }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -143,10 +143,10 @@ jobs:
 
     steps:
       - name: Checkout hasos_more_modules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Checkout home-assistant/operating-system @ ${{ matrix.version }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: home-assistant/operating-system
           ref: ${{ matrix.version }}
