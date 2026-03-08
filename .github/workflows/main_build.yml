@@ -76,12 +76,12 @@ jobs:
       versions: ${{ steps.detect.outputs.versions }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
@@ -143,10 +143,10 @@ jobs:
 
     steps:
       - name: Checkout hasos_more_modules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Checkout home-assistant/operating-system @ ${{ matrix.version }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: home-assistant/operating-system
           ref: ${{ matrix.version }}
@@ -391,7 +391,7 @@ jobs:
           echo "[INFO] Produced ${COUNT} module(s) for ${VERSION}/${BOARD}."
 
       - name: Upload modules as workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: modules-${{ matrix.version }}-${{ matrix.board }}
           path: output_modules/${{ matrix.version }}/${{ matrix.board }}/*.ko
@@ -413,7 +413,7 @@ jobs:
 
     steps:
       - name: Download all compiled artifacts for ${{ matrix.version }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: modules-${{ matrix.version }}-*
           path: release-assets
