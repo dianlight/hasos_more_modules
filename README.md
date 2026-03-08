@@ -14,7 +14,7 @@ Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled
 
 Available modules:
 
-The table below is generated from `config/modules.yml`.
+The table below is generated from `config/modules.json`.
 
 <!-- modules-table:start -->
 | Module    | Description            |
@@ -267,7 +267,7 @@ python3 scripts/check_releases.py \
 
 ### Define new modules and CONFIG_* symbols
 
-To add a new module to the workflow, edit the `config/modules.yml` file and
+To add a new module to the workflow, edit the `config/modules.json` file and
 add the module name, description and the corresponding `CONFIG_*` symbol to
 enable it in the kernel configuration.
 
@@ -307,10 +307,10 @@ hasos_more_modules/
 │   └── workflows/
 │       └── main_build.yml      # Main CI/CD workflow
 ├── config/
-│   └── modules.yml              # Single source of truth for modules and CONFIG_* symbols
+│   └── modules.json              # Single source of truth for modules and CONFIG_* symbols
 ├── scripts/
 │   ├── check_releases.py       # HAOS missing-release detection
-│   ├── modules_config.py       # Reads config/modules.yml for CI/docs
+│   ├── modules_config.py       # Reads config/modules.json for CI/docs
 │   ├── patch_config.sh         # kernel.config patch (YAML-driven)
 │   └── update_readme_modules.py # Regenerates README module table
 ├── .gitignore

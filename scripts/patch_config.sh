@@ -11,9 +11,9 @@
 #   <board>                   Target board name (e.g. generic_x86_64, rpi4_64).
 #                             Optional; used only for informational messages.
 #   <modules-config>          Path to module/config definition file.
-#                             Optional; defaults to config/modules.yml.
+#                             Optional; defaults to config/modules.json.
 #
-# The script loads all CONFIG_* assignments from config/modules.yml and applies
+# The script loads all CONFIG_* assignments from config/modules.json and applies
 # them to the selected kernel.config file.
 
 set -euo pipefail
@@ -28,7 +28,7 @@ fi
 
 CONFIG_FILE="$1"
 BOARD="${2:-unknown}"
-MODULES_CONFIG="${3:-config/modules.yml}"
+MODULES_CONFIG="${3:-config/modules.json}"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
     echo "[ERROR] Config file not found: ${CONFIG_FILE}" >&2
@@ -48,12 +48,18 @@ echo "[INFO] Using module config: ${MODULES_CONFIG}"
 # ---------------------------------------------------------------------------
 
 # set_config_value <symbol> <value>
-#   Ensures <symbol>=<value> is present; replaces any existing assignment.
+#   Ensures <symbol>=<value> is present; only replaces existing values if
+#   they are disabled (n/f).
 set_config_value() {
     local sym="$1"
     local val="$2"
     if grep -qE "^${sym}=" "${CONFIG_FILE}"; then
-        sed -i "s|^${sym}=.*|${sym}=${val}|" "${CONFIG_FILE}"
+        local current_value
+        current_value=$(grep -E "^${sym}=" "${CONFIG_FILE}" | head -n1 | cut -d'=' -f2-)
+
+        if [[ "${current_value}" == "n" || "${current_value}" == "f" ]]; then
+            sed -i "s|^${sym}=.*|${sym}=${val}|" "${CONFIG_FILE}"
+        fi
     elif grep -qE "^# ${sym} is not set" "${CONFIG_FILE}"; then
         sed -i "s|^# ${sym} is not set|${sym}=${val}|" "${CONFIG_FILE}"
     else

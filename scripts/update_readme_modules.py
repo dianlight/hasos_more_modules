@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update the README module table from config/modules.yml."""
+"""Update the README module table from config/modules.json."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Update README module table")
     parser.add_argument("--readme", default="README.md", help="Path to README.md")
     parser.add_argument(
-        "--config", default="config/modules.yml", help="Path to modules.yml"
+        "--config", default="config/modules.json", help="Path to modules.json"
     )
     args = parser.parse_args()
 

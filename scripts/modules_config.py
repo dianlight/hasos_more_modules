@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Utilities for reading module/config metadata from config/modules.yml.
+"""Utilities for reading module/config metadata from config/modules.json.
 
 The file is stored as JSON-compatible YAML so we can parse it with Python's
 standard library only.
@@ -14,7 +14,7 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = REPO_ROOT / "config" / "modules.yml"
+DEFAULT_CONFIG = REPO_ROOT / "config" / "modules.json"
 
 
 def load_config(path: Path) -> dict[str, Any]:
