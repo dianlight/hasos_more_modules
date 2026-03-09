@@ -18,6 +18,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # ---------------------------------------------------------------------------
 # Argument handling
 # ---------------------------------------------------------------------------
@@ -28,7 +31,7 @@ fi
 
 CONFIG_FILE="$1"
 BOARD="${2:-unknown}"
-MODULES_CONFIG="${3:-config/modules.json}"
+MODULES_CONFIG="${3:-${REPO_ROOT}/config/modules.json}"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
     echo "[ERROR] Config file not found: ${CONFIG_FILE}" >&2
@@ -47,6 +50,18 @@ echo "[INFO] Using module config: ${MODULES_CONFIG}"
 # Helper functions
 # ---------------------------------------------------------------------------
 
+# sed_inplace <expr> <file>
+#   Portable in-place sed for GNU/Linux and BSD/macOS.
+sed_inplace() {
+    local expr="$1"
+    local file="$2"
+    if sed --version >/dev/null 2>&1; then
+        sed -i "${expr}" "${file}"
+    else
+        sed -i '' "${expr}" "${file}"
+    fi
+}
+
 # set_config_value <symbol> <value>
 #   Ensures <symbol>=<value> is present; only replaces existing values if
 #   they are disabled (n/f).
@@ -58,10 +73,10 @@ set_config_value() {
         current_value=$(grep -E "^${sym}=" "${CONFIG_FILE}" | head -n1 | cut -d'=' -f2-)
 
         if [[ "${current_value}" == "n" || "${current_value}" == "f" ]]; then
-            sed -i "s|^${sym}=.*|${sym}=${val}|" "${CONFIG_FILE}"
+            sed_inplace "s|^${sym}=.*|${sym}=${val}|" "${CONFIG_FILE}"
         fi
     elif grep -qE "^# ${sym} is not set" "${CONFIG_FILE}"; then
-        sed -i "s|^# ${sym} is not set|${sym}=${val}|" "${CONFIG_FILE}"
+        sed_inplace "s|^# ${sym} is not set|${sym}=${val}|" "${CONFIG_FILE}"
     else
         echo "${sym}=${val}" >> "${CONFIG_FILE}"
     fi
@@ -72,7 +87,7 @@ set_config_value() {
 # ---------------------------------------------------------------------------
 
 echo "[INFO] Applying configured symbols ..."
-ASSIGNMENTS_JSON=$(python3 scripts/modules_config.py --config "${MODULES_CONFIG}" config-assignments-json)
+ASSIGNMENTS_JSON=$(python3 "${SCRIPT_DIR}/modules_config.py" --config "${MODULES_CONFIG}" config-assignments-json)
 mapfile -t ASSIGNMENTS < <(echo "${ASSIGNMENTS_JSON}" | jq -r '.[] | "\(.symbol)|\(.type)|\(.value)"')
 
 if [[ ${#ASSIGNMENTS[@]} -eq 0 ]]; then

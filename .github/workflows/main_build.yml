@@ -233,12 +233,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ${{ steps.arch.outputs.arch_pkg }}
 
-      - name: Patch kernel config fragment
-        run: |
-          bash scripts/patch_config.sh \
-            "${{ steps.locate-config.outputs.config }}" \
-            "${{ matrix.board }}"
-
       - name: Configure and build Linux kernel modules
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
@@ -304,6 +298,18 @@ jobs:
             echo "[ERROR] linux source directory not found under output/build"
             exit 1
           fi
+
+          # Patch the fully merged kernel config so we only modify the
+          # effective value, avoiding fragment-order overrides (e.g. y -> m).
+          echo "[INFO] Patching merged kernel config: ${LINUX_SRC}/.config"
+          bash ../scripts/patch_config.sh "${LINUX_SRC}/.config" "${{ matrix.board }}"
+
+          echo "[INFO] Running kernel olddefconfig after patch ..."
+          make -C "${LINUX_SRC}" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            olddefconfig \
+            2>&1 | tail -30
 
           # Prefer Buildroot's internal cross toolchain if present.
           case "${ARCH}" in
@@ -394,7 +400,7 @@ jobs:
     steps:
       - name: Checkout hasos_more_modules
         uses: actions/checkout@v6
-        
+
       - name: Download all compiled artifacts for ${{ matrix.version }}
         uses: actions/download-artifact@v8
         with:
