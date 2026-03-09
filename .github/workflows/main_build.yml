@@ -392,6 +392,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout hasos_more_modules
+        uses: actions/checkout@v6
+        
       - name: Download all compiled artifacts for ${{ matrix.version }}
         uses: actions/download-artifact@v8
         with:
