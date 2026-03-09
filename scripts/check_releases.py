@@ -26,6 +26,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 GITHUB_API = "https://api.github.com"
@@ -60,11 +61,64 @@ def _get(url: str, token: str | None) -> Any:
 
 
 def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
-    """Return all HAOS release tags (including pre-releases), newest first."""
+    """
+    Return HAOS release tags to consider for builds, newest first.
+
+    Filtering rules:
+    - Exclude releases older than 2 years.
+    - Exclude pre-releases that are not newer (by publish date) than the
+      latest stable (non-pre-release) release.
+    """
     url = f"{GITHUB_API}/repos/{haos_repo}/releases?per_page={PER_PAGE}"
     releases: list[dict] = _get(url, token)
-    # The API returns newest first; keep that order.
-    return [r["tag_name"] for r in releases if r.get("tag_name")]
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=365 * 2)
+
+    # Determine latest stable release timestamp for prerelease filtering.
+    latest_stable_published: datetime | None = None
+    for release in releases:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        published_at = release.get("published_at")
+        if not published_at:
+            continue
+        try:
+            latest_stable_published = datetime.fromisoformat(
+                published_at.replace("Z", "+00:00")
+            )
+            break
+        except ValueError:
+            continue
+
+    filtered_tags: list[str] = []
+    for release in releases:
+        tag = release.get("tag_name")
+        if not tag or release.get("draft"):
+            continue
+
+        published_at = release.get("published_at")
+        if not published_at:
+            continue
+
+        try:
+            published_dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+        except ValueError:
+            # Skip malformed release records defensively.
+            continue
+
+        # Drop releases that are too old.
+        if published_dt < cutoff:
+            continue
+
+        # Keep prereleases only if they are newer than the latest stable release.
+        if release.get("prerelease") and latest_stable_published:
+            if published_dt <= latest_stable_published:
+                continue
+
+        filtered_tags.append(tag)
+
+    return filtered_tags
 
 
 def fetch_compiled_versions(
