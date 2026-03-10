@@ -443,6 +443,37 @@ jobs:
             --version "${{ matrix.version }}" \
             --output release-body.md
 
+      - name: Determine make_latest flag
+        id: make-latest
+        if: steps.check-artifacts.outputs.has_artifacts == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ matrix.version }}"
+
+          # Fetch the tag of the latest stable (non-prerelease) release in this repo.
+          LATEST_TAG=$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${THIS_REPO}/releases/latest" 2>/dev/null \
+            | jq -r '.tag_name // ""')
+
+          if [[ -z "${LATEST_TAG}" ]]; then
+            # No prior stable release – this is effectively the first; mark as latest.
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            # Use version-aware sort: if VERSION is the highest, it is >= LATEST_TAG.
+            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" | sort -V | tail -1)
+            if [[ "${HIGHEST}" == "${VERSION}" ]]; then
+              echo "make_latest=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "make_latest=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+          echo "[INFO] Latest stable release: ${LATEST_TAG:-none}, Current: ${VERSION}"
+
       - name: Create / update GitHub Release
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
         uses: softprops/action-gh-release@v2
@@ -454,4 +485,4 @@ jobs:
           files: release-assets/*.ko.xz
           fail_on_unmatched_files: false
           prerelease: ${{ contains(matrix.version, 'b') || contains(matrix.version, 'rc') || contains(matrix.version, 'dev') }}
-          make_latest: false
+          make_latest: ${{ steps.make-latest.outputs.make_latest }}
