@@ -60,10 +60,6 @@
         {
           "symbol": "CONFIG_IP_QUIC",
           "value": "m"
-        },
-        {
-          "symbol": "CONFIG_IP_QUIC_TEST",
-          "value": "m"
         }
       ]
     }
