@@ -3,7 +3,7 @@ name: Build HAOS Kernel Modules
 on:
   # Run daily at 06:00 UTC to pick up new HAOS releases automatically.
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 3 * * *"
 
   # Allow manual triggering from the GitHub UI.
   workflow_dispatch:
