@@ -2,5 +2,17 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update pinned lxin/quic commit SHA referenced in GitHub Actions workflows",
+      "fileMatch": ["\\.github/workflows/.*\\.yml$"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[^\\s]+) packageName=(?<packageName>[^\\s]+)\\s+ref: (?<currentDigest>[a-f0-9]{40})"
+      ],
+      "currentValueTemplate": "main",
+      "versioningTemplate": "git"
+    }
   ]
 }

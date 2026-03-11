@@ -4,6 +4,11 @@ check_releases.py – Compare the latest HAOS releases (including pre-releases)
 with the versions already published as assets in *this* repository, and print
 any version tags that still need to be built.
 
+A version is flagged as needing a build when:
+- It has never been built (no .ko assets at all), OR
+- It was built before a new module was added to config/modules.json (stale:
+  one or more module artifacts are missing from the release).
+
 Usage:
     python3 scripts/check_releases.py \
         --haos-repo  home-assistant/operating-system \
@@ -27,6 +32,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 GITHUB_API = "https://api.github.com"
@@ -35,6 +41,9 @@ DEFAULT_THIS_REPO = "dianlight/hasos_more_modules"
 
 # How many releases to fetch per page (max allowed by GitHub API).
 PER_PAGE = 100
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = REPO_ROOT / "config" / "modules.json"
 
 
 def _get(url: str, token: str | None) -> Any:
@@ -121,20 +130,45 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
     return filtered_tags
 
 
+def load_module_names(config_path: Path) -> list[str]:
+    """Return module names from the local modules.json config."""
+    try:
+        with config_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [str(m["name"]) for m in data.get("modules", []) if "name" in m]
+    except (OSError, json.JSONDecodeError, KeyError):
+        return []
+
+
+def _has_module_artifact(asset_names: set[str], module: str, tag: str, board: str | None = None) -> bool:
+    """Return True if *asset_names* contains a .ko artifact for the given module/tag/board."""
+    pattern = f"{module}_{tag}_" if board is None else f"{module}_{tag}_{board}.ko"
+    return any(
+        name.startswith(pattern) and (name.endswith(".ko") or name.endswith(".ko.xz") or name.endswith(".ko.gz"))
+        for name in asset_names
+    )
+
+
 def fetch_compiled_versions(
     this_repo: str,
     boards: list[str] | None,
     token: str | None,
+    module_names: list[str] | None = None,
 ) -> set[str]:
     """
-    Return the set of HAOS version tags that have already been compiled.
+    Return the set of HAOS version tags that have already been fully compiled.
 
-    If *boards* is provided and non-empty, a version is considered compiled
-    only when at least one ``.ko`` asset matching ``_{tag}_{board}.ko`` exists
-    for **every** requested board.
+    If *module_names* is provided and non-empty, a version is only considered
+    compiled when ALL listed modules have a ``.ko`` asset for EVERY requested
+    board.  This ensures that releases built before a new module was added to
+    config/modules.json are detected as stale and queued for a rebuild.
 
-    If *boards* is empty or None, any release that contains at least one
-    ``.ko`` asset is treated as already compiled.
+    If *boards* is provided and non-empty (but *module_names* is not), a
+    version is considered compiled only when at least one ``.ko`` asset
+    matching ``_{tag}_{board}.ko`` exists for **every** requested board.
+
+    If neither *boards* nor *module_names* is specified, any release that
+    contains at least one ``.ko`` asset is treated as already compiled.
     """
     url = f"{GITHUB_API}/repos/{this_repo}/releases?per_page={PER_PAGE}"
     releases: list[dict] = _get(url, token)
@@ -145,17 +179,38 @@ def fetch_compiled_versions(
         assets: list[dict] = release.get("assets", [])
         asset_names = {a["name"] for a in assets}
 
-        if not boards:
-            # No board filter – any .ko file marks the version as done.
-            if any(name.endswith(".ko") for name in asset_names):
+        if module_names and boards:
+            # All modules must be present for all boards.
+            all_present = all(
+                _has_module_artifact(asset_names, module, tag, board)
+                for module in module_names
+                for board in boards
+            )
+            if all_present:
                 compiled.add(tag)
-        else:
+        elif module_names:
+            # All modules must be present (no board filter).
+            all_present = all(
+                _has_module_artifact(asset_names, module, tag)
+                for module in module_names
+            )
+            if all_present:
+                compiled.add(tag)
+        elif boards:
             # All requested boards must have at least one .ko asset present.
             board_present = {
-                board: any(f"_{tag}_{board}.ko" in name for name in asset_names)
+                board: _has_module_artifact(asset_names, "", tag, board)
+                or any(f"_{tag}_{board}.ko" in name for name in asset_names)
                 for board in boards
             }
             if all(board_present.values()):
+                compiled.add(tag)
+        else:
+            # No filter – any .ko file marks the version as done.
+            if any(
+                name.endswith(".ko") or name.endswith(".ko.xz") or name.endswith(".ko.gz")
+                for name in asset_names
+            ):
                 compiled.add(tag)
 
     return compiled
@@ -190,6 +245,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "When omitted, any release containing a .ko asset is treated as compiled."
         ),
     )
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help="Path to modules.json config file (default: %(default)s).",
+    )
     return parser.parse_args(argv)
 
 
@@ -216,11 +276,27 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    # Load the current module list so we can detect stale releases that are
+    # missing artifacts for modules added after the release was first built.
+    module_names = load_module_names(Path(args.config))
+    if module_names:
+        print(
+            f"[INFO] Checking for all modules: {', '.join(module_names)}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[WARN] Could not load module names from config – skipping module staleness check.",
+            file=sys.stderr,
+        )
+
     print(
         f"[INFO] Fetching compiled releases from {args.this_repo} ...",
         file=sys.stderr,
     )
-    compiled = fetch_compiled_versions(args.this_repo, args.board, args.token)
+    compiled = fetch_compiled_versions(
+        args.this_repo, args.board, args.token, module_names or None
+    )
 
     new_tags = [t for t in haos_tags if t not in compiled]
 
