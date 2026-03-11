@@ -3,7 +3,7 @@ name: Build HAOS Kernel Modules
 on:
   # Run daily at 06:00 UTC to pick up new HAOS releases automatically.
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 3 * * *"
 
   # Allow manual triggering from the GitHub UI.
   workflow_dispatch:
@@ -154,6 +154,15 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Checkout lxin/quic (out-of-tree QUIC kernel module)
+        uses: actions/checkout@v6
+        with:
+          repository: lxin/quic
+          # renovate: datasource=git-refs packageName=https://github.com/lxin/quic
+          ref: 22d3b0e45b5328640acd278f3c528781ef21c21e
+          path: lxin-quic
+          fetch-depth: 1
+
       # Buildroot needs a set of host packages.
       - name: Install host build dependencies
         run: |
@@ -233,7 +242,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ${{ steps.arch.outputs.arch_pkg }}
 
-      - name: Configure and build Linux kernel modules
+      - name: Configure kernel source via Buildroot
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
           CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
@@ -282,10 +291,10 @@ jobs:
 
           # Locate the real kernel source directory created by linux-configure.
           # Exclude helper trees like linux-headers and linux-firmware.
-          LINUX_SRC=""
+          LINUX_SRC_REL=""
           while IFS= read -r CANDIDATE; do
             if [[ -f "${CANDIDATE}/Makefile" && -f "${CANDIDATE}/.config" ]]; then
-              LINUX_SRC="${CANDIDATE}"
+              LINUX_SRC_REL="${CANDIDATE}"
             fi
           done < <(
             find output/build -maxdepth 1 -type d -name "linux-*" \
@@ -294,15 +303,62 @@ jobs:
               | sort -V
           )
 
-          if [[ -z "${LINUX_SRC}" ]]; then
+          if [[ -z "${LINUX_SRC_REL}" ]]; then
             echo "[ERROR] linux source directory not found under output/build"
             exit 1
           fi
 
+          # Export the absolute path so subsequent steps can reference it via $LINUX_SRC.
+          echo "LINUX_SRC=${GITHUB_WORKSPACE}/operating-system/${LINUX_SRC_REL}" >> "$GITHUB_ENV"
+
+      - name: Integrate lxin/quic into kernel source (skip if natively present)
+        run: |
+          set -euo pipefail
+
+          # If the kernel already ships net/quic natively (future upstream
+          # integration), skip the out-of-tree injection entirely.
+          if [[ -f "${LINUX_SRC}/net/quic/Kconfig" ]]; then
+            echo "[INFO] net/quic/Kconfig already present – QUIC is native in this kernel. Skipping integration."
+            exit 0
+          fi
+
+          echo "[INFO] Integrating QUIC out-of-tree module from lxin/quic ..."
+          QUIC_MODULES_SRC="${GITHUB_WORKSPACE}/lxin-quic/modules"
+
+          # Merge the QUIC UAPI headers into the kernel include tree.
+          # The lxin/quic headers live under include/uapi/linux/quic.h, a new
+          # file not present in the upstream kernel, so there are no conflicts
+          # with existing kernel headers.
+          cp -r "${QUIC_MODULES_SRC}/include/." "${LINUX_SRC}/include/"
+
+          # Copy the QUIC kernel module sources into net/quic/.
+          cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
+
+          # The out-of-tree Makefile adds -I$(ROOTDIR)/include which is only
+          # meaningful in a stand-alone build.  Remove it so the in-tree build
+          # uses the standard kernel include path (where we just placed the headers).
+          sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
+
+          # Register the QUIC module in the kernel build system.
+          # Use exact pattern matching to avoid false positives from comments.
+          grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
+            echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
+          grep -qF 'source "net/quic/Kconfig"' "${LINUX_SRC}/net/Kconfig" || \
+            echo 'source "net/quic/Kconfig"' >> "${LINUX_SRC}/net/Kconfig"
+
+          echo "[INFO] QUIC module integrated into kernel source."
+
+      - name: Patch kernel config and build modules
+        env:
+          ARCH: ${{ steps.arch.outputs.ARCH }}
+          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
+        run: |
+          set -euo pipefail
+
           # Patch the fully merged kernel config so we only modify the
           # effective value, avoiding fragment-order overrides (e.g. y -> m).
           echo "[INFO] Patching merged kernel config: ${LINUX_SRC}/.config"
-          bash ../scripts/patch_config.sh "${LINUX_SRC}/.config" "${{ matrix.board }}"
+          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" "${LINUX_SRC}/.config" "${{ matrix.board }}"
 
           echo "[INFO] Running kernel olddefconfig after patch ..."
           make -C "${LINUX_SRC}" \
@@ -312,9 +368,10 @@ jobs:
             2>&1 | tail -30
 
           # Prefer Buildroot's internal cross toolchain if present.
+          OS_DIR="${GITHUB_WORKSPACE}/operating-system"
           case "${ARCH}" in
-            arm64) MODULE_CROSS_COMPILE="${PWD}/output/host/bin/aarch64-buildroot-linux-gnu-" ;;
-            x86)   MODULE_CROSS_COMPILE="${PWD}/output/host/bin/x86_64-buildroot-linux-gnu-" ;;
+            arm64) MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/aarch64-buildroot-linux-gnu-" ;;
+            x86)   MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/x86_64-buildroot-linux-gnu-" ;;
             *)     MODULE_CROSS_COMPILE="${CROSS_COMPILE}" ;;
           esac
           if [[ ! -x "${MODULE_CROSS_COMPILE}gcc" ]]; then
@@ -332,9 +389,6 @@ jobs:
             CROSS_COMPILE="${MODULE_CROSS_COMPILE}" \
             modules \
             2>&1 | tail -100
-
-          # Store relative-to-workspace-root path for the extraction step.
-          echo "LINUX_SRC=operating-system/${LINUX_SRC}" >> "$GITHUB_ENV"
 
       - name: Extract and rename .ko files
         run: |
