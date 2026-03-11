@@ -154,6 +154,16 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Checkout lxin/quic (out-of-tree QUIC kernel module)
+        uses: actions/checkout@v6
+        with:
+          repository: lxin/quic
+          # Pin to a specific commit for reproducibility and supply-chain safety.
+          # Update this SHA when pulling in new upstream fixes.
+          ref: 22d3b0e45b5328640acd278f3c528781ef21c21e
+          path: lxin-quic
+          fetch-depth: 1
+
       # Buildroot needs a set of host packages.
       - name: Install host build dependencies
         run: |
@@ -301,6 +311,34 @@ jobs:
 
           # Patch the fully merged kernel config so we only modify the
           # effective value, avoiding fragment-order overrides (e.g. y -> m).
+          # First, integrate the lxin/quic out-of-tree module into the kernel
+          # source tree so that CONFIG_IP_QUIC becomes a recognised symbol.
+          echo "[INFO] Integrating QUIC out-of-tree module from lxin/quic ..."
+          QUIC_MODULES_SRC="${GITHUB_WORKSPACE}/lxin-quic/modules"
+
+          # Merge the QUIC UAPI headers into the kernel include tree.
+          # The lxin/quic headers live under include/uapi/linux/quic.h, a new
+          # file not present in the upstream kernel, so there are no conflicts
+          # with existing kernel headers.
+          cp -r "${QUIC_MODULES_SRC}/include/." "${LINUX_SRC}/include/"
+
+          # Copy the QUIC kernel module sources into net/quic/.
+          cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
+
+          # The out-of-tree Makefile adds -I$(ROOTDIR)/include which is only
+          # meaningful in a stand-alone build.  Remove it so the in-tree build
+          # uses the standard kernel include path (where we just placed the headers).
+          sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
+
+          # Register the QUIC module in the kernel build system.
+          # Use exact pattern matching to avoid false positives from comments.
+          grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
+            echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
+          grep -qF 'source "net/quic/Kconfig"' "${LINUX_SRC}/net/Kconfig" || \
+            echo 'source "net/quic/Kconfig"' >> "${LINUX_SRC}/net/Kconfig"
+
+          echo "[INFO] QUIC module integrated into kernel source."
+
           echo "[INFO] Patching merged kernel config: ${LINUX_SRC}/.config"
           bash ../scripts/patch_config.sh "${LINUX_SRC}/.config" "${{ matrix.board }}"
 

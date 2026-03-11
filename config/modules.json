@@ -51,6 +51,17 @@
           "value": "m"
         }
       ]
+    },
+    {
+      "name": "quic",
+      "artifact": "quic.ko",
+      "description": "QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic",
+      "configs": [
+        {
+          "symbol": "CONFIG_IP_QUIC",
+          "value": "m"
+        }
+      ]
     }
   ]
 }

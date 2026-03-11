@@ -17,11 +17,12 @@ Available modules:
 The table below is generated from `config/modules.json`.
 
 <!-- modules-table:start -->
-| Module    | Description            |
-| :-------- | :--------------------- |
-| `xfs.ko`  | XFS filesystem support |
-| `nfsd.ko` | NFS server daemon      |
-| `nfs.ko`  | NFS client support     |
+| Module | Description |
+| :-------- | :------------- |
+| `xfs.ko` | XFS filesystem support |
+| `nfsd.ko` | NFS server daemon |
+| `nfs.ko` | NFS client support |
+| `quic.ko` | QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic |
 <!-- modules-table:end -->
 
 Supported architectures: **x86_64** and **aarch64**.
