@@ -99,7 +99,7 @@ jobs:
             VERSIONS=$(python3 scripts/check_releases.py \
               --haos-repo "${HAOS_REPO}" \
               --this-repo "${THIS_REPO}" \
-              --token     "${GITHUB_TOKEN}"
+              --token     "${GITHUB_TOKEN}")
           fi
 
           if [[ -z "${VERSIONS}" ]]; then
