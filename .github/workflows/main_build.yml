@@ -96,17 +96,10 @@ jobs:
           elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             VERSIONS="${{ github.event.client_payload.version }}"
           else
-            # Build --board arguments from the detected board list so the
-            # script can verify all boards are present before skipping a version.
-            BOARD_ARGS=$(echo '${{ needs.detect-boards.outputs.boards }}' \
-              | jq -r '.[] | "--board \(.)"' \
-              | tr '\n' ' ')
-
             VERSIONS=$(python3 scripts/check_releases.py \
               --haos-repo "${HAOS_REPO}" \
               --this-repo "${THIS_REPO}" \
-              --token     "${GITHUB_TOKEN}" \
-              ${BOARD_ARGS})
+              --token     "${GITHUB_TOKEN}"
           fi
 
           if [[ -z "${VERSIONS}" ]]; then
