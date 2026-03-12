@@ -23,6 +23,14 @@ The table below is generated from `config/modules.json`.
 | `nfsd.ko` | NFS server daemon |
 | `nfs.ko` | NFS client support |
 | `quic.ko` | QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic |
+| `avl.ko` | ZFS AVL tree library – from openzfs/zfs |
+| `icp.ko` | ZFS ICP (Illumos Crypto Provider) – from openzfs/zfs |
+| `lua.ko` | ZFS Lua scripting engine – from openzfs/zfs |
+| `nvpair.ko` | ZFS name-value pair library – from openzfs/zfs |
+| `unicode.ko` | ZFS Unicode support – from openzfs/zfs |
+| `zcommon.ko` | ZFS common library – from openzfs/zfs |
+| `zstd.ko` | ZFS Zstandard compression – from openzfs/zfs |
+| `zfs.ko` | ZFS filesystem support – from openzfs/zfs |
 <!-- modules-table:end -->
 
 Supported architectures: **x86_64** and **aarch64**.

@@ -13,6 +13,15 @@
       ],
       "currentValueTemplate": "main",
       "versioningTemplate": "git"
+    },
+    {
+      "customType": "regex",
+      "description": "Update pinned GitHub release tags referenced in GitHub Actions workflows",
+      "fileMatch": ["\\.github/workflows/.*\\.yml$"],
+      "matchStrings": [
+        "# renovate: datasource=github-releases packageName=(?<packageName>[^\\s]+)\\s+ref: (?<currentValue>[^\\s]+)"
+      ],
+      "datasourceTemplate": "github-releases"
     }
   ]
 }

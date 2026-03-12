@@ -62,6 +62,59 @@
           "value": "m"
         }
       ]
+    },
+    {
+      "name": "avl",
+      "artifact": "avl.ko",
+      "description": "ZFS AVL tree library – from openzfs/zfs",
+      "configs": []
+    },
+    {
+      "name": "icp",
+      "artifact": "icp.ko",
+      "description": "ZFS ICP (Illumos Crypto Provider) – from openzfs/zfs",
+      "configs": []
+    },
+    {
+      "name": "lua",
+      "artifact": "lua.ko",
+      "description": "ZFS Lua scripting engine – from openzfs/zfs",
+      "configs": []
+    },
+    {
+      "name": "nvpair",
+      "artifact": "nvpair.ko",
+      "description": "ZFS name-value pair library – from openzfs/zfs",
+      "configs": []
+    },
+    {
+      "name": "unicode",
+      "artifact": "unicode.ko",
+      "description": "ZFS Unicode support – from openzfs/zfs",
+      "configs": []
+    },
+    {
+      "name": "zcommon",
+      "artifact": "zcommon.ko",
+      "description": "ZFS common library – from openzfs/zfs",
+      "configs": []
+    },
+    {
+      "name": "zstd",
+      "artifact": "zstd.ko",
+      "description": "ZFS Zstandard compression – from openzfs/zfs",
+      "configs": []
+    },
+    {
+      "name": "zfs",
+      "artifact": "zfs.ko",
+      "description": "ZFS filesystem support – from openzfs/zfs",
+      "configs": [
+        {
+          "symbol": "CONFIG_ZFS",
+          "value": "m"
+        }
+      ]
     }
   ]
 }

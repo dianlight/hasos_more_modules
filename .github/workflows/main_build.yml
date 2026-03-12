@@ -156,6 +156,15 @@ jobs:
           path: lxin-quic
           fetch-depth: 1
 
+      - name: Checkout openzfs/zfs (out-of-tree ZFS kernel module)
+        uses: actions/checkout@v6
+        with:
+          repository: openzfs/zfs
+          # renovate: datasource=github-releases packageName=openzfs/zfs
+          ref: zfs-2.2.9
+          path: openzfs-zfs
+          fetch-depth: 1
+
       # Buildroot needs a set of host packages.
       - name: Install host build dependencies
         run: |
@@ -163,7 +172,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential cpio file flex \
             gettext libelf-dev libglib2.0-dev libncurses-dev libssl-dev \
-            python3 python3-jinja2 quilt rsync unzip wget diffstat
+            python3 python3-jinja2 quilt rsync unzip wget diffstat \
+            autoconf automake libtool pkg-config
 
       - name: Locate kernel config for ${{ matrix.board }}
         id: locate-config
@@ -340,6 +350,42 @@ jobs:
             echo 'source "net/quic/Kconfig"' >> "${LINUX_SRC}/net/Kconfig"
 
           echo "[INFO] QUIC module integrated into kernel source."
+
+      - name: Integrate openzfs/zfs into kernel source (skip if natively present)
+        run: |
+          set -euo pipefail
+
+          # If the kernel already ships ZFS natively (future upstream
+          # integration), skip the out-of-tree injection entirely.
+          if [[ -f "${LINUX_SRC}/fs/zfs/Kconfig" ]]; then
+            echo "[INFO] fs/zfs/Kconfig already present – ZFS is native in this kernel. Skipping integration."
+            exit 0
+          fi
+
+          echo "[INFO] Integrating ZFS out-of-tree module from openzfs/zfs ..."
+          ZFS_SRC="${GITHUB_WORKSPACE}/openzfs-zfs"
+
+          cd "${ZFS_SRC}"
+
+          # Generate the configure script from configure.ac.  The ZFS git
+          # repository does not commit the auto-generated configure script;
+          # autogen.sh runs autoconf/automake/libtool to produce it.
+          ./autogen.sh
+
+          # Configure ZFS for kernel-only linux-builtin mode.
+          # --with-config=kernel skips all userspace library checks.
+          # --enable-linux-builtin prepares the sources for copy-builtin.
+          ./configure \
+            --with-linux="${LINUX_SRC}" \
+            --with-linux-obj="${LINUX_SRC}" \
+            --with-config=kernel \
+            --enable-linux-builtin
+
+          # Copy ZFS sources (module/ + include/) into the kernel source tree
+          # under fs/zfs/ and register them in fs/Kconfig and fs/Makefile.
+          ./copy-builtin "${LINUX_SRC}"
+
+          echo "[INFO] ZFS module integrated into kernel source."
 
       - name: Patch kernel config and build modules
         env:
