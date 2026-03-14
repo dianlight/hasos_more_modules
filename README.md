@@ -17,12 +17,20 @@ Available modules:
 The table below is generated from `config/modules.json`.
 
 <!-- modules-table:start -->
-| Module | Description |
-| :-------- | :------------- |
-| `xfs.ko` | XFS filesystem support |
-| `nfsd.ko` | NFS server daemon |
-| `nfs.ko` | NFS client support |
-| `quic.ko` | QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic |
+| Module | Description | Notes |
+| :-------- | :------------- | :----- |
+| `xfs.ko` | XFS filesystem support |  |
+| `nfsd.ko` | NFS server daemon |  |
+| `nfs.ko` | NFS client support |  |
+| `quic.ko` | QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic |  |
+| `avl.ko` | ZFS AVL tree library – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `icp.ko` | ZFS ICP (Illumos Crypto Provider) – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `lua.ko` | ZFS Lua scripting engine – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `nvpair.ko` | ZFS name-value pair library – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `unicode.ko` | ZFS Unicode support – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `zcommon.ko` | ZFS common library – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `zstd.ko` | ZFS Zstandard compression – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `zfs.ko` | ZFS filesystem support – from openzfs/zfs | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
 <!-- modules-table:end -->
 
 Supported architectures: **x86_64** and **aarch64**.

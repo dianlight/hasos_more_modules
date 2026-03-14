@@ -16,8 +16,8 @@ END_MARKER = "<!-- modules-table:end -->"
 def render_table(rows: list[str]) -> str:
     lines = [
         START_MARKER,
-        "| Module | Description |",
-        "| :-------- | :------------- |",
+        "| Module | Description | Notes |",
+        "| :-------- | :------------- | :----- |",
         *rows,
         END_MARKER,
     ]

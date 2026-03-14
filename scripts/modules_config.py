@@ -34,11 +34,26 @@ def load_config(path: Path) -> dict[str, Any]:
         for key in ("name", "artifact", "description", "configs"):
             if key not in module:
                 raise ValueError(f"modules[{idx}] missing '{key}'")
+        exclude_boards = module.get("exclude_boards")
+        if exclude_boards is not None and not isinstance(exclude_boards, list):
+            raise ValueError(f"modules[{idx}] 'exclude_boards' must be a list")
+        exclude_reason = module.get("exclude_reason")
+        if exclude_reason is not None and not isinstance(exclude_reason, str):
+            raise ValueError(f"modules[{idx}] 'exclude_reason' must be a string")
 
     return data
 
 
-def normalize_assignments(data: dict[str, Any]) -> list[dict[str, str]]:
+def _is_excluded(module: dict[str, Any], board: str | None) -> bool:
+    """Return True when *module* should be skipped for *board*."""
+    if board is None:
+        return False
+    return board in module.get("exclude_boards", [])
+
+
+def normalize_assignments(
+    data: dict[str, Any], board: str | None = None
+) -> list[dict[str, str]]:
     assignments: list[dict[str, str]] = []
     seen: set[str] = set()
 
@@ -67,14 +82,30 @@ def normalize_assignments(data: dict[str, Any]) -> list[dict[str, str]]:
 
     modules = data.get("modules", [])
     for module in modules:
+        if _is_excluded(module, board):
+            continue
         for entry in module.get("configs", []):
             add_entry(entry)
 
     return assignments
 
 
-def module_names(data: dict[str, Any]) -> list[str]:
-    return [str(module["name"]) for module in data.get("modules", [])]
+def module_names(data: dict[str, Any], board: str | None = None) -> list[str]:
+    return [
+        str(module["name"])
+        for module in data.get("modules", [])
+        if not _is_excluded(module, board)
+    ]
+
+
+def _exclusion_note(module: dict[str, Any]) -> str:
+    """Return a human-readable note about board exclusions, or empty string."""
+    boards = module.get("exclude_boards", [])
+    if not boards:
+        return ""
+    reason = module.get("exclude_reason", "Not supported on these boards.")
+    boards_fmt = ", ".join(f"`{b}`" for b in boards)
+    return f"⚠️ Not available on {boards_fmt}: {reason}"
 
 
 def module_rows(data: dict[str, Any]) -> list[str]:
@@ -82,20 +113,61 @@ def module_rows(data: dict[str, Any]) -> list[str]:
     for module in data.get("modules", []):
         artifact = str(module["artifact"])
         description = str(module["description"])
-        rows.append(f"| `{artifact}` | {description} |")
+        note = _exclusion_note(module)
+        rows.append(f"| `{artifact}` | {description} | {note} |")
     return rows
+
+
+def _excluded_modules_section(data: dict[str, Any]) -> str:
+    """Return a markdown section listing modules excluded per board, or ''."""
+    # Build mapping: board -> list of (artifact, reason)
+    board_map: dict[str, list[tuple[str, str]]] = {}
+    for module in data.get("modules", []):
+        boards = module.get("exclude_boards", [])
+        if not boards:
+            continue
+        artifact = str(module["artifact"])
+        reason = module.get(
+            "exclude_reason", "Not supported on this board."
+        )
+        for board in boards:
+            board_map.setdefault(board, []).append((artifact, reason))
+
+    if not board_map:
+        return ""
+
+    lines = ["### Board exclusions", ""]
+    for board in sorted(board_map):
+        lines.append(
+            f"**`{board}`** — the following modules are **not** compiled for this board:"
+        )
+        lines.append("")
+        # Collect unique reasons for this board
+        seen_reasons: dict[str, list[str]] = {}
+        for artifact, reason in board_map[board]:
+            seen_reasons.setdefault(reason, []).append(f"`{artifact}`")
+        for reason, artifacts in seen_reasons.items():
+            lines.append(f"- {', '.join(artifacts)}: {reason}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def release_body(version: str, data: dict[str, Any]) -> str:
     rows = "\n".join(module_rows(data))
-    return (
+    excluded_section = _excluded_modules_section(data)
+    body = (
         "Compiled out-of-tree kernel modules for **Home Assistant OS "
         f"{version}**.\n\n"
         "Artifacts are named `{module}_{haos_version}_{board}.ko`.\n\n"
         "### Included modules\n"
-        "| Module | Description |\n"
-        "|:--------|:-------------|\n"
+        "| Module | Description | Notes |\n"
+        "|:--------|:-------------|:------|\n"
         f"{rows}\n\n"
+    )
+    if excluded_section:
+        body += excluded_section + "\n"
+    body += (
         "### Supported boards\n"
         "One set of `.ko` files is provided per board listed below.\n"
         "Each file is compiled against the **exact** kernel shipped with\n"
@@ -103,6 +175,7 @@ def release_body(version: str, data: dict[str, Any]) -> str:
         "different kernel version will fail.\n\n"
         "See the README for installation instructions.\n"
     )
+    return body
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=str(DEFAULT_CONFIG),
         help="Path to modules.yml (JSON-compatible YAML)",
+    )
+    parser.add_argument(
+        "--board",
+        default=None,
+        help="Target board name; modules with this board in 'exclude_boards' are skipped",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -135,17 +213,18 @@ def main() -> int:
     args = parser.parse_args()
 
     data = load_config(Path(args.config))
+    board: str | None = args.board
 
     if args.command == "module-names":
-        print("\n".join(module_names(data)))
+        print("\n".join(module_names(data, board)))
         return 0
 
     if args.command == "module-names-json":
-        print(json.dumps(module_names(data)))
+        print(json.dumps(module_names(data, board)))
         return 0
 
     if args.command == "config-assignments-json":
-        print(json.dumps(normalize_assignments(data)))
+        print(json.dumps(normalize_assignments(data, board)))
         return 0
 
     if args.command == "module-table-rows":

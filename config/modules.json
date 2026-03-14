@@ -62,6 +62,75 @@
           "value": "m"
         }
       ]
+    },
+    {
+      "name": "avl",
+      "artifact": "avl.ko",
+      "description": "ZFS AVL tree library – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": []
+    },
+    {
+      "name": "icp",
+      "artifact": "icp.ko",
+      "description": "ZFS ICP (Illumos Crypto Provider) – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": []
+    },
+    {
+      "name": "lua",
+      "artifact": "lua.ko",
+      "description": "ZFS Lua scripting engine – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": []
+    },
+    {
+      "name": "nvpair",
+      "artifact": "nvpair.ko",
+      "description": "ZFS name-value pair library – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": []
+    },
+    {
+      "name": "unicode",
+      "artifact": "unicode.ko",
+      "description": "ZFS Unicode support – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": []
+    },
+    {
+      "name": "zcommon",
+      "artifact": "zcommon.ko",
+      "description": "ZFS common library – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": []
+    },
+    {
+      "name": "zstd",
+      "artifact": "zstd.ko",
+      "description": "ZFS Zstandard compression – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": []
+    },
+    {
+      "name": "zfs",
+      "artifact": "zfs.ko",
+      "description": "ZFS filesystem support – from openzfs/zfs",
+      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
+      "configs": [
+        {
+          "symbol": "CONFIG_ZFS",
+          "value": "m"
+        }
+      ]
     }
   ]
 }
