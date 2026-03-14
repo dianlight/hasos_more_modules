@@ -358,6 +358,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Check whether ZFS is excluded for this board.  When excluded, skip
+          # both the source integration and the make prepare step so we don't
+          # waste time and the subsequent config patch will not set CONFIG_ZFS=m.
+          BOARD="${{ matrix.board }}"
+          ZFS_EXCLUDED=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            --board "${BOARD}" module-names-json \
+            | python3 -c "import sys,json; names=json.load(sys.stdin); print('false' if 'zfs' in names else 'true')")
+          if [[ "${ZFS_EXCLUDED}" == "true" ]]; then
+            echo "[INFO] ZFS is excluded for board '${BOARD}' – skipping integration."
+            exit 0
+          fi
+
           # If the kernel already ships ZFS natively (future upstream
           # integration), skip the out-of-tree injection entirely.
           if [[ -f "${LINUX_SRC}/fs/zfs/Kconfig" ]]; then
@@ -449,7 +461,7 @@ jobs:
           OUT_DIR="output_modules/${VERSION}/${BOARD}"
           mkdir -p "${OUT_DIR}"
 
-          mapfile -t MODULE_NAMES < <(python3 scripts/modules_config.py module-names)
+          mapfile -t MODULE_NAMES < <(python3 scripts/modules_config.py --board "${BOARD}" module-names)
           if [[ ${#MODULE_NAMES[@]} -eq 0 ]]; then
             echo "[ERROR] No modules found in config/modules.json"
             exit 1

@@ -87,7 +87,7 @@ set_config_value() {
 # ---------------------------------------------------------------------------
 
 echo "[INFO] Applying configured symbols ..."
-ASSIGNMENTS_JSON=$(python3 "${SCRIPT_DIR}/modules_config.py" --config "${MODULES_CONFIG}" config-assignments-json)
+ASSIGNMENTS_JSON=$(python3 "${SCRIPT_DIR}/modules_config.py" --config "${MODULES_CONFIG}" --board "${BOARD}" config-assignments-json)
 mapfile -t ASSIGNMENTS < <(echo "${ASSIGNMENTS_JSON}" | jq -r '.[] | "\(.symbol)|\(.type)|\(.value)"')
 
 if [[ ${#ASSIGNMENTS[@]} -eq 0 ]]; then
