@@ -4,7 +4,12 @@ scripts/build_matrix.py
 ========================
 Generates the GitHub Actions strategy matrix JSON from:
   - missing_versions.json  (output of check_releases.py)
-  - config/modules.json    (board definitions + module list)
+    - config/modules.json    (module policy + optional board overrides)
+
+Board list source:
+    - Comes from missing_versions.json combinations (already discovered from
+        HAOS defconfigs by check_releases.py)
+    - build_matrix.py does not maintain its own static board list
 
 The matrix drives the build-modules job: one entry per (version, board) pair.
 
@@ -51,10 +56,11 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from modules_config import ModulesConfig, ExcludeKind
+from modules_config import ModulesConfig, ExcludeKind  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +75,50 @@ BUILDROOT_ARCH_MAP: dict[str, str] = {
     "x86_64": "x86_64",
     "aarch64": "aarch64",
 }
+
+KERNEL_ARCH_MAP: dict[str, str] = {
+    "x86_64": "x86",
+    "aarch64": "arm64",
+}
+
+
+@dataclass(frozen=True)
+class ResolvedBoardConfig:
+    arch: str
+    kernel_arch: str
+    defconfig: str
+    kernel_tree: str
+
+
+def _default_defconfig_for_board(board: str) -> str:
+    if board == "x86_64":
+        return "generic_x86_64_defconfig"
+    return f"{board}_defconfig"
+
+
+def _resolve_board_config(
+    board: str, arch: str, cfg: ModulesConfig
+) -> ResolvedBoardConfig:
+    """Resolve board settings from modules.json when present, otherwise infer safe defaults."""
+    if board in cfg.boards:
+        b = cfg.boards[board]
+        return ResolvedBoardConfig(
+            arch=arch or b.arch,
+            kernel_arch=b.kernel_arch,
+            defconfig=b.defconfig,
+            kernel_tree=b.kernel_tree,
+        )
+
+    resolved_arch = arch
+    if not resolved_arch:
+        raise ValueError(f"Missing architecture for unknown board '{board}'")
+
+    return ResolvedBoardConfig(
+        arch=resolved_arch,
+        kernel_arch=KERNEL_ARCH_MAP.get(resolved_arch, resolved_arch),
+        defconfig=_default_defconfig_for_board(board),
+        kernel_tree="upstream",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +142,6 @@ def build_matrix(
         missing_data = json.load(f)
 
     cfg = ModulesConfig(modules_path)
-    boards = cfg.boards
-
     combinations: list[dict] = missing_data.get("combinations", [])
     if not combinations:
         return {"include": []}
@@ -147,14 +195,7 @@ def build_matrix(
             continue
         seen.add(key)
 
-        if board not in boards:
-            print(
-                f"[build_matrix] WARN: unknown board '{board}', skipping",
-                file=sys.stderr,
-            )
-            continue
-
-        board_cfg = boards[board]
+        board_cfg = _resolve_board_config(board, arch, cfg)
 
         # Collect ZFS modules for this board
         zfs_names: list[str] = []
@@ -180,7 +221,7 @@ def build_matrix(
         entry = {
             "version": version,
             "board": board,
-            "arch": arch or board_cfg.arch,
+            "arch": board_cfg.arch,
             "kernel_arch": board_cfg.kernel_arch,
             "defconfig": board_cfg.defconfig,
             "cross_compile": CROSS_COMPILE_MAP.get(board_cfg.arch, ""),

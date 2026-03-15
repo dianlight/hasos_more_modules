@@ -30,6 +30,14 @@ on:
         description: "Max HAOS versions to build per run (0=all, default 1)"
         required: false
         default: "1"
+      build_mode:
+        description: "Build path: full (in-tree + out-of-tree) or fast-modules (out-of-tree only)"
+        type: choice
+        options:
+          - fast-modules
+          - full
+        required: false
+        default: fast-modules
   repository_dispatch:
     types: [build-modules]
 
@@ -41,9 +49,9 @@ env:
   HAOS_REPO: home-assistant/operating-system
   THIS_REPO: ${{ github.repository }}
   BR_DL_DIR: /tmp/buildroot-dl
-  # Resolution order: workflow_dispatch input → repo variable → default 1.
-  # Configure via Settings → Variables → New repository variable: MAX_PENDING_VERSIONS
-  MAX_PENDING_VERSIONS: ${{ inputs.max_pending_versions || vars.MAX_PENDING_VERSIONS || '1' }}
+  # For schedule/repository_dispatch, force conservative default = 1.
+  # For workflow_dispatch, allow input override.
+  MAX_PENDING_VERSIONS: ${{ github.event_name == 'workflow_dispatch' && (inputs.max_pending_versions || '1') || '1' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -127,10 +135,21 @@ jobs:
       HAOS_VERSION: ${{ matrix.version }}
       BOARD: ${{ matrix.board }}
       ARCH: ${{ matrix.arch }}
+      BUILD_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.build_mode || 'fast-modules') || 'fast-modules' }}
+      FAST_MODULES: ${{ (github.event_name == 'workflow_dispatch' && (inputs.build_mode || 'fast-modules') || 'fast-modules') == 'fast-modules' && 'true' || 'false' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve build mode
+        run: |
+          echo "Build mode: ${BUILD_MODE}"
+          if [[ "${FAST_MODULES}" == "true" ]]; then
+            echo "Fast path enabled: skip in-tree patch/rebuild; build only selected out-of-tree modules."
+          else
+            echo "Full path enabled: include in-tree patch + linux-rebuild."
+          fi
 
       # -----------------------------------------------------------------------
       # Cache: Buildroot downloads
@@ -266,12 +285,13 @@ jobs:
       - name: Build kernel
         working-directory: haos
         run: |
+          set -o pipefail
           echo "=== linux-build ==="
           make -C output \
             BR2_DL_DIR="$BR_DL_DIR" \
             BR2_CCACHE_DIR="/tmp/br-ccache" \
             linux-build 2>&1 | \
-            grep -v '^  \(GEN\|UPD\|DEP\|LN\)' | tail -60 || true
+            grep -v '^  \(GEN\|UPD\|DEP\|LN\)' | tail -60
 
           LINUX_DIR=$(find output/build -maxdepth 1 -name 'linux-*' -type d 2>/dev/null | head -1)
           if [[ -z "$LINUX_DIR" ]]; then
@@ -296,6 +316,7 @@ jobs:
       # Patch kernel .config to enable in-tree extra modules
       # -----------------------------------------------------------------------
       - name: Patch kernel config
+        if: env.FAST_MODULES != 'true'
         run: |
           KCONFIG="${LINUX_DIR}/.config"
           [[ -f "$KCONFIG" ]] || { echo "::error::$KCONFIG not found"; exit 1; }
@@ -313,13 +334,15 @@ jobs:
       # Rebuild kernel with patched config → produces in-tree .ko files
       # -----------------------------------------------------------------------
       - name: Build in-tree kernel modules
+        if: env.FAST_MODULES != 'true'
         working-directory: haos
         run: |
+          set -o pipefail
           make -C output \
             BR2_DL_DIR="$BR_DL_DIR" \
             BR2_CCACHE_DIR="/tmp/br-ccache" \
             linux-rebuild 2>&1 | \
-            grep -E '(CC \[M\]|LD \[M\]|MODPOST|Building modules|\.ko:|error:)' || true
+            grep -E '(CC \[M\]|LD \[M\]|MODPOST|Building modules|\.ko:|error:)'
 
       # -----------------------------------------------------------------------
       # Build QUIC module (out-of-tree, GPL-2.0)
@@ -396,10 +419,15 @@ jobs:
             fi
           }
 
-          echo "--- In-tree ---"
-          while IFS= read -r -d '' ko; do
-            collect_ko "$ko" "in-tree"
-          done < <(find "${LINUX_DIR}" -name '*.ko' -print0 2>/dev/null)
+          if [[ "${FAST_MODULES}" == "true" ]]; then
+            echo "--- In-tree ---"
+            echo "  skipped (fast-modules mode)"
+          else
+            echo "--- In-tree ---"
+            while IFS= read -r -d '' ko; do
+              collect_ko "$ko" "in-tree"
+            done < <(find "${LINUX_DIR}" -name '*.ko' -print0 2>/dev/null)
+          fi
 
           echo "--- Out-of-tree (ZFS / QUIC) ---"
           if [[ -d output_modules ]]; then
@@ -443,6 +471,7 @@ jobs:
             "haos_version": "%s",
             "board": "%s",
             "arch": "%s",
+            "build_mode": "%s",
             "kernel_version": "%s",
             "zfs_ref": "%s",
             "zfs_safe_mode": "%s",
@@ -451,7 +480,7 @@ jobs:
             "built_at": "%s",
             "workflow_run": "%s"
           }\n' \
-            "${HAOS_VERSION}" "${BOARD}" "${ARCH}" "${KVER}" \
+            "${HAOS_VERSION}" "${BOARD}" "${ARCH}" "${BUILD_MODE}" "${KVER}" \
             "${{ steps.refs.outputs.zfs_ref }}" \
             "${{ steps.gpl-probe.outputs.safe || 'n/a' }}" \
             "${{ steps.refs.outputs.quic_ref }}" \

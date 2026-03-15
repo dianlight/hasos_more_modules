@@ -16,8 +16,7 @@ Usage example:
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import dataclass, field
+import dataclasses
 from enum import Enum
 from pathlib import Path
 from typing import Iterator, Optional
@@ -26,7 +25,7 @@ from typing import Iterator, Optional
 # Default path resolution
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_REPO_ROOT   = _SCRIPT_DIR.parent
+_REPO_ROOT = _SCRIPT_DIR.parent
 _DEFAULT_MODULES_JSON = _REPO_ROOT / "config" / "modules.json"
 
 
@@ -34,44 +33,49 @@ _DEFAULT_MODULES_JSON = _REPO_ROOT / "config" / "modules.json"
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 class ExcludeKind(Enum):
     """
     NONE        - module can be built for this board
     HARD        - board can never build this module (hardware/arch impossibility)
     SOFT_NEON   - excluded only if GPL probe detects kernel_neon_begin as GPL-only
     """
-    NONE      = "none"
-    HARD      = "hard"
+
+    NONE = "none"
+    HARD = "hard"
     SOFT_NEON = "soft_neon"
 
 
-@dataclass
+@dataclasses.dataclass
 class ModuleSource:
-    repo:    str
-    ref:     str
-    kind:    str          # "zfs_module" | "external" | ""
-    subdir:  str = ""
+    repo: str
+    ref: str
+    kind: str  # "zfs_module" | "external" | ""
+    subdir: str = ""
 
 
-@dataclass
+@dataclasses.dataclass
 class Module:
-    name:        str
+    name: str
     description: str
-    kconfig:     list[str]
-    license:     str
-    notes:       str
-    source:      Optional[ModuleSource]
+    kconfig: list[str]
+    license: str
+    notes: str
+    source: Optional[ModuleSource]
     # boards listed in exclude_boards.hard
-    hard_excluded_boards:      list[str]
+    hard_excluded_boards: list[str]
     # boards listed in exclude_boards.soft_neon
     soft_neon_excluded_boards: list[str]
-    build_flags_by_arch:       dict
+    build_flags_by_arch: dict[str, list[str]]
 
     # -----------------------------------------------------------------------
     @property
     def is_external(self) -> bool:
         """True if this module is built out-of-tree (ZFS, QUIC, …)."""
-        return self.source is not None and self.source.kind in ("zfs_module", "external")
+        return self.source is not None and self.source.kind in (
+            "zfs_module",
+            "external",
+        )
 
     @property
     def is_zfs(self) -> bool:
@@ -103,29 +107,30 @@ class Module:
         return True
 
 
-@dataclass
+@dataclasses.dataclass
 class Board:
-    name:        str
-    arch:        str
+    name: str
+    arch: str
     kernel_arch: str
-    defconfig:   str
-    kernel_tree: str   # "upstream" | "rpi"
-    note:        str
+    defconfig: str
+    kernel_tree: str  # "upstream" | "rpi"
+    note: str
 
 
-@dataclass
+@dataclasses.dataclass
 class ZfsBuildConfig:
-    repo:                  str
-    ref:                   str
-    configure_base:        list[str]
+    repo: str
+    ref: str
+    configure_base: list[str]
     configure_aarch64_safe: list[str]
     tracepoints_disable_cflags: str
-    modules_order:         list[str]
+    modules_order: list[str]
 
 
 # ---------------------------------------------------------------------------
 # Main config class
 # ---------------------------------------------------------------------------
+
 
 class ModulesConfig:
     """
@@ -136,10 +141,10 @@ class ModulesConfig:
         self._path = Path(path) if path else _DEFAULT_MODULES_JSON
         with open(self._path) as f:
             raw = json.load(f)
-        self._raw      = raw
-        self._modules  = self._parse_modules(raw.get("modules", []))
-        self._boards   = self._parse_boards(raw.get("boards", {}))
-        self._zfs      = self._parse_zfs(raw.get("zfs_build", {}))
+        self._raw = raw
+        self._modules = self._parse_modules(raw.get("modules", []))
+        self._boards = self._parse_boards(raw.get("boards", {}))
+        self._zfs = self._parse_zfs(raw.get("zfs_build", {}))
 
     # -----------------------------------------------------------------------
     # Parsers
@@ -150,26 +155,28 @@ class ModulesConfig:
         result = []
         for m in raw:
             src_raw = m.get("source")
-            source  = None
+            source = None
             if src_raw:
                 source = ModuleSource(
-                    repo   = src_raw.get("repo", ""),
-                    ref    = src_raw.get("ref", ""),
-                    kind   = src_raw.get("type", ""),
-                    subdir = src_raw.get("subdir", ""),
+                    repo=src_raw.get("repo", ""),
+                    ref=src_raw.get("ref", ""),
+                    kind=src_raw.get("type", ""),
+                    subdir=src_raw.get("subdir", ""),
                 )
             exc = m.get("exclude_boards", {})
-            result.append(Module(
-                name        = m["name"],
-                description = m.get("description", ""),
-                kconfig     = m.get("kconfig", []),
-                license     = m.get("license", "unknown"),
-                notes       = m.get("notes", ""),
-                source      = source,
-                hard_excluded_boards      = exc.get("hard", []),
-                soft_neon_excluded_boards = exc.get("soft_neon", []),
-                build_flags_by_arch       = m.get("build_flags_by_arch", {}),
-            ))
+            result.append(
+                Module(
+                    name=m["name"],
+                    description=m.get("description", ""),
+                    kconfig=m.get("kconfig", []),
+                    license=m.get("license", "unknown"),
+                    notes=m.get("notes", ""),
+                    source=source,
+                    hard_excluded_boards=exc.get("hard", []),
+                    soft_neon_excluded_boards=exc.get("soft_neon", []),
+                    build_flags_by_arch=m.get("build_flags_by_arch", {}),
+                )
+            )
         return result
 
     @staticmethod
@@ -177,24 +184,26 @@ class ModulesConfig:
         result = {}
         for name, b in raw.items():
             result[name] = Board(
-                name        = name,
-                arch        = b.get("arch", ""),
-                kernel_arch = b.get("kernel_arch", ""),
-                defconfig   = b.get("defconfig", ""),
-                kernel_tree = b.get("kernel_tree", "upstream"),
-                note        = b.get("_note", ""),
+                name=name,
+                arch=b.get("arch", ""),
+                kernel_arch=b.get("kernel_arch", ""),
+                defconfig=b.get("defconfig", ""),
+                kernel_tree=b.get("kernel_tree", "upstream"),
+                note=b.get("_note", ""),
             )
         return result
 
     @staticmethod
     def _parse_zfs(raw: dict) -> ZfsBuildConfig:
         return ZfsBuildConfig(
-            repo                       = raw.get("repo", "https://github.com/openzfs/zfs"),
-            ref                        = raw.get("ref", "zfs-2.2-release"),
-            configure_base             = raw.get("configure_base", []),
-            configure_aarch64_safe     = raw.get("configure_aarch64_safe", []),
-            tracepoints_disable_cflags = raw.get("tracepoints_disable_cflags", "-DZFS_NO_TRACEPOINTS"),
-            modules_order              = raw.get("modules_order", []),
+            repo=raw.get("repo", "https://github.com/openzfs/zfs"),
+            ref=raw.get("ref", "zfs-2.2-release"),
+            configure_base=raw.get("configure_base", []),
+            configure_aarch64_safe=raw.get("configure_aarch64_safe", []),
+            tracepoints_disable_cflags=raw.get(
+                "tracepoints_disable_cflags", "-DZFS_NO_TRACEPOINTS"
+            ),
+            modules_order=raw.get("modules_order", []),
         )
 
     # -----------------------------------------------------------------------
@@ -265,7 +274,9 @@ class ModulesConfig:
         """
         parts = []
         if mod.soft_neon_excluded_boards:
-            boards_str = ", ".join(f"`{b}`" for b in sorted(mod.soft_neon_excluded_boards))
+            boards_str = ", ".join(
+                f"`{b}`" for b in sorted(mod.soft_neon_excluded_boards)
+            )
             parts.append(
                 f"⚠️ On {boards_str}: built in **safe mode** "
                 f"(no NEON AES acceleration) when `kernel_neon_begin` is "
@@ -281,10 +292,11 @@ class ModulesConfig:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import argparse, sys
+    import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Inspect modules.json")
-    parser.add_argument("--board",  default="", help="Filter for a specific board")
+    parser.add_argument("--board", default="", help="Filter for a specific board")
     parser.add_argument("--list-boards", action="store_true")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
@@ -304,4 +316,6 @@ if __name__ == "__main__":
             print(f"  {mod.name:20s}  license={mod.license:20s}{flag}")
     else:
         for mod in cfg.modules:
-            print(f"  {mod.name:20s}  external={mod.is_external}  zfs={mod.is_zfs}  license={mod.license}")
+            print(
+                f"  {mod.name:20s}  external={mod.is_external}  zfs={mod.is_zfs}  license={mod.license}"
+            )

@@ -9,10 +9,10 @@ Run with:
     python3 -m pytest tests/test_modules_config.py -v
 """
 
+# pyright: reportMissingImports=false
+
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,14 +20,7 @@ import pytest
 # Add scripts/ to the path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from modules_config import (
-    Board,
-    ExcludeKind,
-    Module,
-    ModulesConfig,
-    ModuleSource,
-    ZfsBuildConfig,
-)
+from modules_config import ExcludeKind, ModulesConfig  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +202,9 @@ class TestExclusions:
         for mod in cfg.zfs_modules():
             for board in rpi_boards:
                 kind = mod.exclude_kind_for(board)
-                assert kind == ExcludeKind.SOFT_NEON, \
-                    f"{mod.name} should be SOFT_NEON on {board}, got {kind}"
+                assert (
+                    kind == ExcludeKind.SOFT_NEON
+                ), f"{mod.name} should be SOFT_NEON on {board}, got {kind}"
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +229,10 @@ class TestModulesForBoard:
         assert ExcludeKind.SOFT_NEON == mods["zfs"]
 
     def test_rpi4_excludes_soft_neon_when_flag_set(self, cfg):
-        mods = {m.name: k for m, k in cfg.modules_for_board("rpi4_64", include_soft_neon=False)}
+        mods = {
+            m.name: k
+            for m, k in cfg.modules_for_board("rpi4_64", include_soft_neon=False)
+        }
         assert "zfs" not in mods
         assert "xfs" in mods
 
@@ -253,7 +250,7 @@ class TestModulesForBoard:
 
 class TestBoards:
     def test_all_expected_boards_present(self, cfg):
-        expected = {"x86_64", "odroid_c4", "odroid_n2", "rpi3_64", "rpi4_64", "rpi5_64", "yellow"}
+        expected = {"x86_64", "rpi3_64", "rpi4_64", "rpi5_64", "yellow"}
         assert expected.issubset(set(cfg.boards.keys()))
 
     def test_rpi_boards_have_rpi_kernel_tree(self, cfg):
@@ -263,9 +260,6 @@ class TestBoards:
 
     def test_x86_has_upstream_kernel_tree(self, cfg):
         assert cfg.board("x86_64").kernel_tree == "upstream"
-
-    def test_odroid_has_upstream_kernel_tree(self, cfg):
-        assert cfg.board("odroid_c4").kernel_tree == "upstream"
 
     def test_board_raises_on_unknown(self, cfg):
         with pytest.raises(KeyError):
@@ -403,7 +397,7 @@ class TestBuildMatrix:
         matrix = build_matrix(str(missing_file), str(minimal_json))
         assert matrix["include"] == []
 
-    def test_unknown_board_skipped(self, tmp_path, minimal_json):
+    def test_unknown_board_uses_inferred_defaults(self, tmp_path, minimal_json):
         from build_matrix import build_matrix
 
         missing = {
@@ -417,7 +411,13 @@ class TestBuildMatrix:
         missing_file.write_text(json.dumps(missing))
 
         matrix = build_matrix(str(missing_file), str(minimal_json))
-        assert matrix["include"] == []
+        assert len(matrix["include"]) == 1
+        entry = matrix["include"][0]
+        assert entry["board"] == "unknown_board_xyz"
+        assert entry["arch"] == "aarch64"
+        assert entry["kernel_arch"] == "arm64"
+        assert entry["defconfig"] == "unknown_board_xyz_defconfig"
+        assert entry["kernel_tree"] == "upstream"
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +462,12 @@ class TestUpdateReadme:
 
     def test_update_readme_no_change_if_up_to_date(self, cfg, tmp_path):
         """Running update twice should report no change on the second run."""
-        from update_readme_modules import TABLE_END, TABLE_START, generate_table, update_readme
+        from update_readme_modules import (
+            TABLE_END,
+            TABLE_START,
+            generate_table,
+            update_readme,
+        )
 
         table = generate_table(cfg)
         readme = tmp_path / "README.md"
@@ -485,6 +490,7 @@ class TestUpdateReadme:
 
 if __name__ == "__main__":
     import subprocess
+
     subprocess.run(
         [sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"],
         check=False,

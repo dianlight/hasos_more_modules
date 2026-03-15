@@ -242,16 +242,6 @@
       "kernel_arch": "x86",
       "defconfig": "generic_x86_64_defconfig"
     },
-    "odroid_c4": {
-      "arch": "aarch64",
-      "kernel_arch": "arm64",
-      "defconfig": "odroid_c4_defconfig"
-    },
-    "odroid_n2": {
-      "arch": "aarch64",
-      "kernel_arch": "arm64",
-      "defconfig": "odroid_n2_defconfig"
-    },
     "rpi3_64": {
       "arch": "aarch64",
       "kernel_arch": "arm64",
