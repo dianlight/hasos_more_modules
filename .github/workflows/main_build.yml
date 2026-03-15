@@ -17,7 +17,7 @@ name: Build extra HAOS kernel modules
 
 on:
   schedule:
-    - cron: "0 6 * * *"      # Daily at 06:00 UTC
+    - cron: "0 6 * * *" # Daily at 06:00 UTC
   workflow_dispatch:
     inputs:
       haos_version:
@@ -34,19 +34,19 @@ on:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: false   # Don't cancel: builds are long and idempotent
+  cancel-in-progress: false # Don't cancel: builds are long and idempotent
 
 # ---------------------------------------------------------------------------
 # Global environment
 # ---------------------------------------------------------------------------
 env:
-  HAOS_REPO:       home-assistant/operating-system
-  THIS_REPO:       ${{ github.repository }}
+  HAOS_REPO: home-assistant/operating-system
+  THIS_REPO: ${{ github.repository }}
   BUILDROOT_CACHE: buildroot-cache
-  ZFS_CACHE:       zfs-source-cache
+  ZFS_CACHE: zfs-source-cache
   # Buildroot output is large; cache only the dl/ (downloads) directory.
   # The build/ directory is too large (~8GB) and changes every kernel bump.
-  BR_DL_DIR:       /tmp/buildroot-dl
+  BR_DL_DIR: /tmp/buildroot-dl
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -120,10 +120,10 @@ jobs:
       matrix: ${{ fromJson(needs.detect-releases.outputs.matrix) }}
 
     env:
-      HAOS_VERSION:  ${{ matrix.version }}
-      BOARD:         ${{ matrix.board }}
-      ARCH:          ${{ matrix.arch }}
-      BR_ARCH:       ${{ matrix.buildroot_arch }}
+      HAOS_VERSION: ${{ matrix.version }}
+      BOARD: ${{ matrix.board }}
+      ARCH: ${{ matrix.arch }}
+      BR_ARCH: ${{ matrix.buildroot_arch }}
 
     steps:
       - name: Checkout
@@ -419,17 +419,17 @@ jobs:
 
           # Write JSON with printf to avoid heredoc indentation issues
           printf '{
-  "haos_version": "%s",
-  "board": "%s",
-  "arch": "%s",
-  "kernel_version": "%s",
-  "zfs_ref": "%s",
-  "zfs_safe_mode": "%s",
-  "quic_ref": "%s",
-  "module_count": %s,
-  "built_at": "%s",
-  "workflow_run": "%s"
-}\n' \
+              "haos_version": "%s",
+              "board": "%s",
+              "arch": "%s",
+              "kernel_version": "%s",
+              "zfs_ref": "%s",
+              "zfs_safe_mode": "%s",
+              "quic_ref": "%s",
+              "module_count": %s,
+              "built_at": "%s",
+              "workflow_run": "%s"
+            }\n' \
             "${HAOS_VERSION}" \
             "${BOARD}" \
             "${ARCH}" \
