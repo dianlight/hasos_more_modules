@@ -53,7 +53,7 @@ jobs:
     name: Detect missing releases
     runs-on: ubuntu-22.04
     outputs:
-      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      matrix:   ${{ steps.build-matrix.outputs.matrix }}
       has_work: ${{ steps.build-matrix.outputs.has_work }}
 
     steps:
@@ -125,8 +125,8 @@ jobs:
 
     env:
       HAOS_VERSION: ${{ matrix.version }}
-      BOARD: ${{ matrix.board }}
-      ARCH: ${{ matrix.arch }}
+      BOARD:        ${{ matrix.board }}
+      ARCH:         ${{ matrix.arch }}
 
     steps:
       - name: Checkout
@@ -198,8 +198,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: home-assistant/operating-system
-          ref: ${{ matrix.version }}
-          path: haos
+          ref:        ${{ matrix.version }}
+          path:       haos
           submodules: recursive
           fetch-depth: 1
 
@@ -234,21 +234,30 @@ jobs:
             BR2_DL_DIR="$BR_DL_DIR" \
             "${{ matrix.defconfig }}"
 
-          # HAOS defconfigs hardcode BR2_DL_DIR="/cache" (their Docker mount path).
-          # After make defconfig writes output/.config, patch it to use our actual
-          # download directory so subsequent make calls don't try to create /cache.
+          # HAOS defconfigs hardcode Docker-specific paths:
+          #   BR2_DL_DIR="/cache"       → download cache (Docker volume)
+          #   BR2_CCACHE_DIR="/cache/cc" → ccache directory (Docker volume)
+          # Patch both to writable paths inside our runner workspace.
           OUTPUT_CONFIG="output/.config"
           if [[ -f "$OUTPUT_CONFIG" ]]; then
-            echo "Patching BR2_DL_DIR in $OUTPUT_CONFIG"
-            # Replace any BR2_DL_DIR line (Docker path like /cache) with our path
-            sed -i "s|^BR2_DL_DIR=.*|BR2_DL_DIR=\"${BR_DL_DIR}\"|" "$OUTPUT_CONFIG"
-            grep 'BR2_DL_DIR' "$OUTPUT_CONFIG" || true
+            echo "Patching Docker paths in $OUTPUT_CONFIG ..."
+            sed -i \
+              -e "s|^BR2_DL_DIR=.*|BR2_DL_DIR=\"${BR_DL_DIR}\"|" \
+              -e "s|^BR2_CCACHE_DIR=.*|BR2_CCACHE_DIR=\"/tmp/br-ccache\"|" \
+              "$OUTPUT_CONFIG"
+            echo "  BR2_DL_DIR    = $(grep '^BR2_DL_DIR=' "$OUTPUT_CONFIG")"
+            echo "  BR2_CCACHE_DIR = $(grep '^BR2_CCACHE_DIR=' "$OUTPUT_CONFIG" || echo '(not set)')"
           fi
 
-          # Also write a local.mk override so make always uses our DL dir
-          # regardless of what .config says (Buildroot respects this)
-          echo "BR2_DL_DIR := ${BR_DL_DIR}" > output/local.mk
-          echo "Local.mk: $(cat output/local.mk)"
+          # local.mk overrides — Buildroot reads this file and it has top priority
+          # over values in .config. Covers any path that .config might miss.
+          mkdir -p /tmp/br-ccache
+          cat > output/local.mk << LOCALMK
+BR2_DL_DIR := ${BR_DL_DIR}
+BR2_CCACHE_DIR := /tmp/br-ccache
+LOCALMK
+          echo "local.mk written:"
+          cat output/local.mk
 
       # -----------------------------------------------------------------------
       # Build the Linux kernel
@@ -260,6 +269,7 @@ jobs:
           echo "=== linux-build ==="
           make -C output \
             BR2_DL_DIR="$BR_DL_DIR" \
+            BR2_CCACHE_DIR="/tmp/br-ccache" \
             linux-build 2>&1 | \
             grep -v '^  \(GEN\|UPD\|DEP\|LN\)' | tail -60 || true
 
@@ -307,6 +317,7 @@ jobs:
         run: |
           make -C output \
             BR2_DL_DIR="$BR_DL_DIR" \
+            BR2_CCACHE_DIR="/tmp/br-ccache" \
             linux-rebuild 2>&1 | \
             grep -E '(CC \[M\]|LD \[M\]|MODPOST|Building modules|\.ko:|error:)' || true
 
@@ -462,8 +473,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.version }}
-          name: "HAOS ${{ matrix.version }} kernel modules"
-          files: release_assets/*
+          name:     "HAOS ${{ matrix.version }} kernel modules"
+          files:    release_assets/*
           body: |
             Extra kernel modules for **Home Assistant OS ${{ matrix.version }}**.
 
