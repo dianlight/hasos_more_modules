@@ -4,7 +4,9 @@
     {
       "name": "xfs",
       "description": "XFS filesystem support",
-      "kconfig": ["CONFIG_XFS_FS"],
+      "kconfig": [
+        "CONFIG_XFS_FS"
+      ],
       "license": "GPL-2.0"
     },
     {
@@ -51,7 +53,12 @@
       "license": "CDDL-1.0",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ],
         "_soft_neon_reason": "ZFS CDDL uses kernel_neon_begin/end (EXPORT_SYMBOL_GPL on Linux >=6.2 aarch64). Fixed in OpenZFS PR#15711 (merged 2.2.x). If the pinned ZFS ref includes that fix AND the board kernel is <6.2, building is safe. Script will probe at configure time."
       },
       "build_flags_by_arch": {
@@ -59,11 +66,13 @@
           "env": {
             "ZFS_DISABLE_NEON_CHECK": "1"
           },
-          "configure_extra": ["--enable-linux-builtin"],
+          "configure_extra": [
+            "--enable-linux-builtin"
+          ],
           "_note": "Used only if the configure-time neon probe passes (i.e., kernel_neon_begin is not GPL-only in this kernel build)"
         }
       },
-      "notes": "⚠️ RPi/Yellow boards: NEON symbols are GPL-only on Linux ≥6.2 aarch64. Auto-detected at build time; excluded if incompatible."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: NEON symbols are GPL-only on Linux \u22656.2 aarch64. Auto-detected at build time; excluded if incompatible."
     },
     {
       "name": "icp",
@@ -78,16 +87,21 @@
       "license": "CDDL-1.0",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ]
       },
       "build_flags_by_arch": {
         "aarch64": {
           "kconfig_overrides": [
-            "# CONFIG_KERNEL_MODE_NEON is guarded — icp will fall back to generic C impl if NEON unavailable"
+            "# CONFIG_KERNEL_MODE_NEON is guarded \u2014 icp will fall back to generic C impl if NEON unavailable"
           ]
         }
       },
-      "notes": "⚠️ RPi/Yellow boards: same NEON/CDDL constraint as avl.ko. Auto-detected."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: same NEON/CDDL constraint as avl.ko. Auto-detected."
     },
     {
       "name": "lua",
@@ -102,9 +116,14 @@
       "license": "CDDL-1.0",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ]
       },
-      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "nvpair",
@@ -119,9 +138,14 @@
       "license": "CDDL-1.0",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ]
       },
-      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "unicode",
@@ -136,9 +160,14 @@
       "license": "CDDL-1.0",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ]
       },
-      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "zcommon",
@@ -153,9 +182,14 @@
       "license": "CDDL-1.0",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ]
       },
-      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "zstd",
@@ -170,9 +204,14 @@
       "license": "CDDL-1.0 AND BSD-3-Clause",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ]
       },
-      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "zfs",
@@ -187,17 +226,21 @@
       "license": "CDDL-1.0",
       "exclude_boards": {
         "hard": [],
-        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+        "soft_neon": [
+          "rpi3_64",
+          "rpi4_64",
+          "rpi5_64",
+          "yellow"
+        ]
       },
-      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected at build time via scripts/probe_gpl_symbols.sh."
+      "notes": "\u26a0\ufe0f RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected at build time via scripts/probe_gpl_symbols.sh."
     }
   ],
-
   "boards": {
     "x86_64": {
       "arch": "x86_64",
       "kernel_arch": "x86",
-      "defconfig": "pc_x86_64_efi_defconfig"
+      "defconfig": "generic_x86_64_defconfig"
     },
     "odroid_c4": {
       "arch": "aarch64",
@@ -212,21 +255,21 @@
     "rpi3_64": {
       "arch": "aarch64",
       "kernel_arch": "arm64",
-      "defconfig": "rpi3_defconfig",
+      "defconfig": "rpi3_64_defconfig",
       "kernel_tree": "rpi",
       "_note": "Uses Raspberry Pi Foundation kernel tree. kernel_neon_begin/end are EXPORT_SYMBOL_GPL on this tree."
     },
     "rpi4_64": {
       "arch": "aarch64",
       "kernel_arch": "arm64",
-      "defconfig": "rpi4_defconfig",
+      "defconfig": "rpi4_64_defconfig",
       "kernel_tree": "rpi",
       "_note": "Uses Raspberry Pi Foundation kernel tree."
     },
     "rpi5_64": {
       "arch": "aarch64",
       "kernel_arch": "arm64",
-      "defconfig": "rpi5_defconfig",
+      "defconfig": "rpi5_64_defconfig",
       "kernel_tree": "rpi",
       "_note": "Uses Raspberry Pi Foundation kernel tree."
     },
@@ -238,7 +281,6 @@
       "_note": "Home Assistant Yellow board. Uses RPi CM4, same kernel tree constraints."
     }
   },
-
   "zfs_build": {
     "_doc": "Global ZFS build configuration. Used by scripts/build_zfs.sh.",
     "repo": "https://github.com/openzfs/zfs",
