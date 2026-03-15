@@ -1,0 +1,191 @@
+# =============================================================================
+# .github/workflows/test.yml
+#
+# Runs the Python test suite on every PR and push to main.
+# Keeps the scripts honest without needing a full Buildroot build.
+# =============================================================================
+
+name: Python tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "config/**"
+      - "tests/**"
+      - "requirements.txt"
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "config/**"
+      - "tests/**"
+      - "requirements.txt"
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Python script tests (pytest)
+  # ---------------------------------------------------------------------------
+  python-tests:
+    name: Python tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run pytest
+        run: |
+          python3 -m pytest tests/ -v \
+            --tb=short \
+            --cov=scripts \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # ---------------------------------------------------------------------------
+  # Shell script linting (shellcheck)
+  # ---------------------------------------------------------------------------
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on all .sh scripts
+        run: |
+          find scripts/ -name '*.sh' -print0 | \
+            xargs -0 shellcheck \
+              --severity=warning \
+              --exclude=SC2086  # double-quote optional args
+        continue-on-error: true   # warn but don't block
+
+  # ---------------------------------------------------------------------------
+  # JSON validation
+  # ---------------------------------------------------------------------------
+  validate-json:
+    name: Validate JSON files
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate config/modules.json
+        run: |
+          python3 -c "
+          import json, sys
+
+          with open('config/modules.json') as f:
+              data = json.load(f)
+
+          print('=== Validating modules.json ===')
+
+          # Check required top-level keys
+          required = {'modules', 'boards', 'zfs_build'}
+          missing = required - set(data)
+          assert not missing, f'Missing top-level keys: {missing}'
+          print('  ✅ Top-level keys present')
+
+          # Check every module has required fields
+          for mod in data['modules']:
+              assert 'name'    in mod, f'Module missing name: {mod}'
+              assert 'license' in mod, f'Module {mod[\"name\"]} missing license'
+              assert 'kconfig' in mod, f'Module {mod[\"name\"]} missing kconfig'
+          print(f'  ✅ All {len(data[\"modules\"])} modules valid')
+
+          # Check every board has required fields
+          for name, board in data['boards'].items():
+              assert 'arch'        in board, f'Board {name} missing arch'
+              assert 'kernel_arch' in board, f'Board {name} missing kernel_arch'
+              assert 'defconfig'   in board, f'Board {name} missing defconfig'
+          print(f'  ✅ All {len(data[\"boards\"])} boards valid')
+
+          # Check ZFS build config
+          zfs = data['zfs_build']
+          assert 'repo' in zfs and 'ref' in zfs, 'zfs_build missing repo/ref'
+          assert zfs['modules_order'][-1] == 'zfs', 'zfs must be last in modules_order'
+          print('  ✅ ZFS build config valid')
+
+          # Check all boards referenced in soft_neon are defined
+          board_names = set(data['boards'].keys())
+          for mod in data['modules']:
+              exc = mod.get('exclude_boards', {})
+              for b in exc.get('hard', []) + exc.get('soft_neon', []):
+                  assert b in board_names, \
+                      f'Module {mod[\"name\"]}: exclude_boards references unknown board {b!r}'
+          print('  ✅ All exclude_boards references are valid board names')
+
+          print()
+          print('modules.json is valid ✓')
+          "
+
+      - name: Validate renovate.json
+        run: python3 -c "import json; json.load(open('renovate.json')); print('renovate.json valid ✓')"
+
+  # ---------------------------------------------------------------------------
+  # probe_gpl_symbols.sh unit tests
+  # ---------------------------------------------------------------------------
+  probe-tests:
+    name: probe_gpl_symbols.sh tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run probe_gpl_symbols.sh tests
+        run: bash tests/test_probe_gpl_symbols.sh
+
+  # ---------------------------------------------------------------------------
+  # Summary
+  # ---------------------------------------------------------------------------
+  test-summary:
+    name: Test Summary
+    needs: [python-tests, shellcheck, validate-json, probe-tests]
+    if: always()
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Report
+        run: |
+          echo "## Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Python tests | ${{ needs.python-tests.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ShellCheck   | ${{ needs.shellcheck.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Validate JSON| ${{ needs.validate-json.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Probe tests  | ${{ needs.probe-tests.result }} |" >> "$GITHUB_STEP_SUMMARY"

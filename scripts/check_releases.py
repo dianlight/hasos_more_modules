@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-check_releases.py – Compare the latest HAOS releases (including pre-releases)
-with the versions already published as assets in *this* repository, and print
-any version tags that still need to be built.
-
-A version is flagged as needing a build when:
-- It has never been built (no .ko assets matching the tag), OR
-- The release was last updated BEFORE the last modification of
-  config/modules.json (stale: built before a new module was added).
+scripts/check_releases.py
+==========================
+Compares HAOS releases with already-built module assets in this repo
+and outputs a list of (version, board) pairs that need building.
 
 Usage:
-    python3 scripts/check_releases.py \
-        --haos-repo  home-assistant/operating-system \
-        --this-repo  dianlight/hasos_more_modules \
-        [--token      <GITHUB_TOKEN>]
+    python3 scripts/check_releases.py \\
+        --haos-repo home-assistant/operating-system \\
+        --this-repo dianlight/hasos_more_modules \\
+        --output missing_versions.json
 
-Exit codes:
-    0 – at least one new version was found (the list is printed to stdout,
-        one tag per line, so the CI can capture it with $() or similar).
-    1 – all current HAOS releases are already compiled; nothing to do.
-    2 – a fatal error occurred (e.g. API rate limit, network failure).
+    # Force a specific version (bypass HAOS API):
+    python3 scripts/check_releases.py ... --force-version 17.2
+
+    # Rebuild everything even if assets already exist:
+    python3 scripts/check_releases.py ... --force-rebuild
+
+Environment:
+    GITHUB_TOKEN - optional, increases GitHub API rate-limit from 60 to 5000 req/h
 """
 
 from __future__ import annotations
@@ -27,265 +26,269 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
-import urllib.error
-import urllib.request
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import time
 from typing import Any
 
-GITHUB_API = "https://api.github.com"
-DEFAULT_HAOS_REPO = "home-assistant/operating-system"
-DEFAULT_THIS_REPO = "dianlight/hasos_more_modules"
-MODULES_JSON_PATH = "config/modules.json"
+import requests
 
-# How many releases to fetch per page (max allowed by GitHub API).
-PER_PAGE = 100
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+GITHUB_API     = "https://api.github.com"
+MIN_HAOS_VER   = (13, 0)      # Ignore HAOS releases older than this
+MAX_VERSIONS   = 20            # Consider only the N most recent HAOS releases
+RETRY_ATTEMPTS = 3
+RETRY_DELAY    = 5             # seconds
+
+# Expected asset suffix patterns per board + arch combo
+# Key: board name   Value: arch string used in asset filename
+BOARD_ARCH_MAP: dict[str, str] = {
+    "x86_64":    "x86_64",
+    "odroid_c4": "aarch64",
+    "odroid_n2": "aarch64",
+    "rpi3_64":   "aarch64",
+    "rpi4_64":   "aarch64",
+    "rpi5_64":   "aarch64",
+    "yellow":    "aarch64",
+}
+
+# A release is considered "complete" if at least this many of the core
+# modules are present as assets (tolerates partial ZFS exclusions).
+CORE_MODULES = ["xfs", "nfsd", "nfs"]
 
 
-def _get(url: str, token: str | None) -> Any:
-    """Perform a GET request to the GitHub API and return the parsed JSON."""
-    req = urllib.request.Request(url)
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+# ---------------------------------------------------------------------------
+# GitHub helpers
+# ---------------------------------------------------------------------------
+
+def _gh_headers() -> dict[str, str]:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        print(
-            f"[ERROR] HTTP {exc.code} while fetching {url}: {exc.reason}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    except urllib.error.URLError as exc:
-        print(
-            f"[ERROR] Network error while fetching {url}: {exc.reason}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        h["Authorization"] = f"Bearer {token}"
+    return h
 
 
-def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
-    """
-    Return HAOS release tags to consider for builds, newest first.
-
-    Filtering rules:
-    - Exclude draft releases.
-    - Exclude releases older than 2 years.
-    - Exclude pre-releases that are not newer (by publish date) than the
-      latest stable (non-pre-release) release.
-    """
-    url = f"{GITHUB_API}/repos/{haos_repo}/releases?per_page={PER_PAGE}"
-    releases: list[dict] = _get(url, token)
-
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=365 * 2)
-
-    # Determine latest stable release timestamp for prerelease filtering.
-    latest_stable_published: datetime | None = None
-    for release in releases:
-        if release.get("draft") or release.get("prerelease"):
+def _gh_get(url: str, params: dict | None = None) -> Any:
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        resp = requests.get(url, headers=_gh_headers(), params=params, timeout=30)
+        if resp.status_code == 403 and "rate limit" in resp.text.lower():
+            reset = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+            wait  = max(reset - int(time.time()), 1)
+            print(f"[check_releases] Rate-limited. Waiting {wait}s…", file=sys.stderr)
+            time.sleep(wait)
             continue
-        published_at = release.get("published_at")
-        if not published_at:
-            continue
-        try:
-            latest_stable_published = datetime.fromisoformat(
-                published_at.replace("Z", "+00:00")
-            )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+    raise RuntimeError(f"GitHub API request failed after {RETRY_ATTEMPTS} attempts: {url}")
+
+
+def _gh_get_all_pages(url: str, params: dict | None = None) -> list[Any]:
+    """Paginate through all results."""
+    base_params = dict(params or {})
+    base_params.setdefault("per_page", 100)
+    results: list[Any] = []
+    page = 1
+    while True:
+        base_params["page"] = page
+        data = _gh_get(url, base_params)
+        if not data:
             break
-        except ValueError:
-            continue
-
-    filtered_tags: list[str] = []
-    for release in releases:
-        tag = release.get("tag_name")
-        if not tag or release.get("draft"):
-            continue
-
-        published_at = release.get("published_at")
-        if not published_at:
-            continue
-
-        try:
-            published_dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-
-        # Drop releases that are too old.
-        if published_dt < cutoff:
-            continue
-
-        # Keep pre-releases only if they are newer than the latest stable release.
-        if release.get("prerelease") and latest_stable_published:
-            if published_dt <= latest_stable_published:
-                continue
-
-        filtered_tags.append(tag)
-
-    return filtered_tags
+        results.extend(data)
+        if len(data) < base_params["per_page"]:
+            break
+        page += 1
+    return results
 
 
-def fetch_modules_json_last_modified(
-    this_repo: str, token: str | None
-) -> datetime | None:
+# ---------------------------------------------------------------------------
+# Version helpers
+# ---------------------------------------------------------------------------
+
+def _parse_version(tag: str) -> tuple[int, ...] | None:
     """
-    Return the date of the last commit that touched config/modules.json
-    in *this_repo*, or None if it cannot be determined.
+    Parse a HAOS version tag like '17.1', '13.2', '14.0-rc.1'.
+    Returns None for tags that don't match expected patterns.
     """
-    url = (
-        f"{GITHUB_API}/repos/{this_repo}/commits"
-        f"?path={MODULES_JSON_PATH}&per_page=1"
-    )
-    commits: list[dict] = _get(url, token)
-    if not commits:
+    # Strip leading 'v' if present
+    tag = tag.lstrip("v")
+    # Accept X.Y and X.Y.Z but not pre-release tags (rc, beta, dev)
+    if re.search(r"(rc|alpha|beta|dev)", tag, re.IGNORECASE):
         return None
-    try:
-        committed_at: str = commits[0]["commit"]["committer"]["date"]
-        return datetime.fromisoformat(committed_at.replace("Z", "+00:00"))
-    except (KeyError, ValueError):
+    m = re.fullmatch(r"(\d+)\.(\d+)(?:\.(\d+))?", tag)
+    if not m:
         return None
+    return tuple(int(x) for x in m.groups() if x is not None)
 
 
-def fetch_compiled_versions(
-    this_repo: str,
-    token: str | None,
-    modules_json_last_modified: datetime | None,
-) -> set[str]:
-    """
-    Return the set of HAOS version tags that have already been fully compiled.
+def _version_ok(ver: tuple[int, ...]) -> bool:
+    return ver[:2] >= MIN_HAOS_VER
 
-    A release is considered compiled when BOTH of the following are true:
 
-    1. **Freshness** – the release ``updated_at`` timestamp is strictly newer
-       than the last commit date of ``config/modules.json``.  Any release
-       built before the modules list was last changed is treated as stale and
-       scheduled for a rebuild.
-       (Skipped when *modules_json_last_modified* is None.)
+# ---------------------------------------------------------------------------
+# Fetch HAOS releases
+# ---------------------------------------------------------------------------
 
-    2. **Artifact presence** – the release contains at least one asset whose
-       name includes the release tag and ends with ``.ko``, ``.ko.xz``, or
-       ``.ko.gz``.
-    """
-    url = f"{GITHUB_API}/repos/{this_repo}/releases?per_page={PER_PAGE}"
-    releases: list[dict] = _get(url, token)
+def fetch_haos_versions(haos_repo: str) -> list[str]:
+    """Return stable HAOS version strings, newest first, up to MAX_VERSIONS."""
+    url  = f"{GITHUB_API}/repos/{haos_repo}/releases"
+    data = _gh_get_all_pages(url, {"per_page": 50})
 
-    compiled: set[str] = set()
-    for release in releases:
-        tag = release.get("tag_name", "")
-        if not tag:
+    versions: list[tuple[tuple[int, ...], str]] = []
+    for rel in data:
+        if rel.get("draft") or rel.get("prerelease"):
             continue
+        tag = rel.get("tag_name", "")
+        ver = _parse_version(tag)
+        if ver and _version_ok(ver):
+            versions.append((ver, tag.lstrip("v")))
 
-        # ── Rule 1: freshness check ──────────────────────────────────────────
-        if modules_json_last_modified is not None:
-            updated_at = release.get("updated_at") or release.get("published_at")
-            if not updated_at:
-                continue
-            try:
-                updated_dt = datetime.fromisoformat(
-                    updated_at.replace("Z", "+00:00")
-                )
-            except ValueError:
-                continue
-            if updated_dt <= modules_json_last_modified:
-                # Built before (or exactly when) modules.json was last changed → stale.
-                continue
-
-        # ── Rule 2: at least one matching .ko artifact ───────────────────────
-        asset_names: set[str] = {a["name"] for a in release.get("assets", [])}
-        has_ko = any(
-            tag in name
-            and (
-                name.endswith(".ko")
-                or name.endswith(".ko.xz")
-                or name.endswith(".ko.gz")
-            )
-            for name in asset_names
-        )
-        if has_ko:
-            compiled.add(tag)
-
-    return compiled
+    # Sort newest first
+    versions.sort(key=lambda x: x[0], reverse=True)
+    return [v for _, v in versions[:MAX_VERSIONS]]
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+# ---------------------------------------------------------------------------
+# Fetch already-built assets in this repo
+# ---------------------------------------------------------------------------
+
+def fetch_built_assets(this_repo: str) -> dict[str, set[str]]:
+    """
+    Return a dict: { version_tag -> set_of_asset_names }.
+
+    Asset names follow the convention: {module}_{version}_{arch}.ko
+    e.g. xfs_17.1_x86_64.ko
+    """
+    url   = f"{GITHUB_API}/repos/{this_repo}/releases"
+    rels  = _gh_get_all_pages(url)
+    built: dict[str, set[str]] = {}
+    for rel in rels:
+        tag    = rel.get("tag_name", "").lstrip("v")
+        assets = {a["name"] for a in rel.get("assets", [])}
+        if tag and assets:
+            built[tag] = assets
+    return built
+
+
+# ---------------------------------------------------------------------------
+# Determine what's missing
+# ---------------------------------------------------------------------------
+
+def missing_combinations(
+    haos_versions: list[str],
+    built_assets:  dict[str, set[str]],
+    force_rebuild: bool = False,
+) -> list[dict[str, str]]:
+    """
+    Return list of { version, board, arch } that need building.
+    A combination is missing if ANY core module asset is absent for it.
+    """
+    missing: list[dict[str, str]] = []
+
+    for version in haos_versions:
+        assets = built_assets.get(version, set()) if not force_rebuild else set()
+
+        for board, arch in BOARD_ARCH_MAP.items():
+            # Check if all core modules are present for this version+board
+            needed_assets = {f"{mod}_{version}_{arch}.ko" for mod in CORE_MODULES}
+            already_built = needed_assets.issubset(assets)
+
+            if not already_built:
+                missing.append({
+                    "version": version,
+                    "board":   board,
+                    "arch":    arch,
+                })
+
+    return missing
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check which HAOS releases still need kernel modules compiled."
+        description="Detect HAOS versions that need new module builds",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--haos-repo",
-        default=os.environ.get("HAOS_REPO", DEFAULT_HAOS_REPO),
-        help="Source HAOS repository (default: %(default)s).",
-    )
-    parser.add_argument(
-        "--this-repo",
-        default=os.environ.get("THIS_REPO", DEFAULT_THIS_REPO),
-        help="This repository where compiled assets are published (default: %(default)s).",
-    )
-    parser.add_argument(
-        "--token",
-        default=os.environ.get("GITHUB_TOKEN"),
-        help="GitHub personal access token (or set GITHUB_TOKEN env var).",
-    )
-    return parser.parse_args(argv)
+    parser.add_argument("--haos-repo",     required=True,
+                        help="GitHub repo of HAOS, e.g. home-assistant/operating-system")
+    parser.add_argument("--this-repo",     required=True,
+                        help="GitHub repo of this project, e.g. dianlight/hasos_more_modules")
+    parser.add_argument("--output",        default="missing_versions.json",
+                        help="Path to write the JSON output (default: missing_versions.json)")
+    parser.add_argument("--force-version", default="",
+                        help="Skip HAOS API and use this specific version")
+    parser.add_argument("--force-rebuild", action="store_true",
+                        help="Treat all versions as missing (rebuild everything)")
+    parser.add_argument("--max-versions",  type=int, default=MAX_VERSIONS,
+                        help=f"Max number of recent HAOS releases to consider (default: {MAX_VERSIONS})")
+    args = parser.parse_args()
 
-
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    print(
-        f"[INFO] Fetching HAOS releases from {args.haos_repo} ...",
-        file=sys.stderr,
-    )
-    haos_tags = fetch_haos_tags(args.haos_repo, args.token)
-    if not haos_tags:
-        print("[WARN] No HAOS releases found.", file=sys.stderr)
-        return 1
-
-    print(
-        f"[INFO] Fetching last modification date of {MODULES_JSON_PATH} "
-        f"from {args.this_repo} ...",
-        file=sys.stderr,
-    )
-    modules_json_mtime = fetch_modules_json_last_modified(
-        args.this_repo, args.token
-    )
-    if modules_json_mtime:
-        print(
-            f"[INFO] {MODULES_JSON_PATH} last modified: {modules_json_mtime.isoformat()}",
-            file=sys.stderr,
-        )
+    # -----------------------------------------------------------------------
+    # Collect HAOS versions to check
+    # -----------------------------------------------------------------------
+    if args.force_version:
+        print(f"[check_releases] Forced version: {args.force_version}", file=sys.stderr)
+        haos_versions = [args.force_version]
     else:
-        print(
-            f"[WARN] Could not determine last modification date of "
-            f"{MODULES_JSON_PATH} – freshness check will be skipped.",
-            file=sys.stderr,
-        )
+        print(f"[check_releases] Fetching HAOS releases from {args.haos_repo}…", file=sys.stderr)
+        haos_versions = fetch_haos_versions(args.haos_repo)
+        print(f"[check_releases] Found {len(haos_versions)} stable releases", file=sys.stderr)
+        if haos_versions:
+            print(f"[check_releases] Latest: {haos_versions[0]}", file=sys.stderr)
 
-    print(
-        f"[INFO] Fetching compiled releases from {args.this_repo} ...",
-        file=sys.stderr,
-    )
-    compiled = fetch_compiled_versions(
-        args.this_repo, args.token, modules_json_mtime
-    )
+    if not haos_versions:
+        print("[check_releases] No HAOS versions found.", file=sys.stderr)
+        result = {"versions": [], "combinations": [], "count": 0}
+        with open(args.output, "w") as f:
+            json.dump(result, f, indent=2)
+        return 0
 
-    new_tags = [t for t in haos_tags if t not in compiled]
+    # -----------------------------------------------------------------------
+    # Fetch already-built assets
+    # -----------------------------------------------------------------------
+    if args.force_rebuild:
+        print("[check_releases] --force-rebuild: treating all versions as missing", file=sys.stderr)
+        built_assets: dict[str, set[str]] = {}
+    else:
+        print(f"[check_releases] Fetching built assets from {args.this_repo}…", file=sys.stderr)
+        built_assets = fetch_built_assets(args.this_repo)
+        print(f"[check_releases] Found assets for {len(built_assets)} releases", file=sys.stderr)
 
-    if not new_tags:
-        print(
-            "[INFO] All HAOS releases are already compiled. Nothing to do.",
-            file=sys.stderr,
-        )
-        return 1
+    # -----------------------------------------------------------------------
+    # Compute missing
+    # -----------------------------------------------------------------------
+    missing = missing_combinations(haos_versions, built_assets, force_rebuild=args.force_rebuild)
 
-    print(f"[INFO] {len(new_tags)} new version(s) to compile:", file=sys.stderr)
-    for tag in new_tags:
-        print(f"  {tag}", file=sys.stderr)
-        print(tag)
+    # Unique versions with missing builds
+    missing_versions = sorted(set(c["version"] for c in missing), reverse=True)
 
+    result = {
+        "versions":     missing_versions,
+        "combinations": missing,
+        "count":        len(missing),
+        "all_haos_versions_checked": haos_versions,
+    }
+
+    # -----------------------------------------------------------------------
+    # Write output
+    # -----------------------------------------------------------------------
+    output_path = args.output
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"[check_releases] {len(missing)} missing (version, board) combinations", file=sys.stderr)
+    for c in missing:
+        print(f"  -> {c['version']} / {c['board']} ({c['arch']})", file=sys.stderr)
+
+    print(f"[check_releases] Output written to: {output_path}", file=sys.stderr)
     return 0
 
 

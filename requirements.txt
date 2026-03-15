@@ -1,14 +1,12 @@
-# Runtime dependencies for scripts/check_releases.py
-#
-# The script uses only the Python standard library (urllib, json, argparse),
-# so there are no mandatory third-party packages.
-#
-# The packages below are optional quality-of-life extras that make local
-# development easier.
+# Runtime dependencies for hasos_more_modules scripts
+# Install with: pip install -r requirements.txt
 
-# Pretty-print JSON responses during debugging (optional).
-# Uncomment if needed:
-# rich>=13.0
+# GitHub API calls (check_releases.py, build_matrix.py)
+requests>=2.31.0
 
-# Type checking (development only).
-# mypy>=1.0
+# Type annotations backport for Python 3.9 compatibility
+# (dataclasses are built-in from 3.7+, but 'from __future__ import annotations'
+#  requires no extra package — listed here for clarity)
+
+# Optional: faster JSON parsing (not strictly required)
+# orjson>=3.9.0

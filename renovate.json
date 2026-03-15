@@ -3,25 +3,46 @@
   "extends": [
     "config:recommended"
   ],
+  "labels": ["dependencies"],
+  "reviewers": [],
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency Dashboard",
+
+  "packageRules": [
+    {
+      "description": "Group all updates together for simplicity",
+      "matchPackagePatterns": ["*"],
+      "groupName": "all dependencies"
+    }
+  ],
+
   "customManagers": [
     {
+      "description": "Track OpenZFS ref in config/modules.json",
       "customType": "regex",
-      "description": "Update pinned lxin/quic commit SHA referenced in GitHub Actions workflows",
-      "fileMatch": ["\\.github/workflows/.*\\.yml$"],
+      "fileMatch": ["^config/modules\\.json$"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>[^\\s]+) packageName=(?<packageName>[^\\s]+)\\s+ref: (?<currentDigest>[a-f0-9]{40})"
+        "\"repo\":\\s*\"https://github\\.com/openzfs/zfs\",\\s*\"ref\":\\s*\"(?<currentValue>[^\"]+)\""
       ],
-      "currentValueTemplate": "main",
-      "versioningTemplate": "git"
+      "datasourceTemplate": "github-tags",
+      "depNameTemplate": "openzfs/zfs",
+      "versioningTemplate": "loose"
     },
     {
+      "description": "Track lxin/quic ref in config/modules.json",
       "customType": "regex",
-      "description": "Update pinned GitHub release tags referenced in GitHub Actions workflows",
-      "fileMatch": ["\\.github/workflows/.*\\.yml$"],
+      "fileMatch": ["^config/modules\\.json$"],
       "matchStrings": [
-        "# renovate: datasource=github-releases packageName=(?<packageName>[^\\s]+)\\s+ref: (?<currentValue>[^\\s]+)"
+        "\"repo\":\\s*\"https://github\\.com/lxin/quic\",\\s*\"ref\":\\s*\"(?<currentValue>[^\"]+)\""
       ],
-      "datasourceTemplate": "github-releases"
+      "datasourceTemplate": "github-tags",
+      "depNameTemplate": "lxin/quic",
+      "versioningTemplate": "loose"
     }
+  ],
+
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/vendor/**"
   ]
 }

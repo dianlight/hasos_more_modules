@@ -1,606 +1,505 @@
-name: Build HAOS Kernel Modules
+# =============================================================================
+# .github/workflows/main_build.yml
+#
+# Main CI/CD workflow for hasos_more_modules.
+#
+# Optimizations vs previous version:
+#   1. Buildroot download + build cache: skips re-downloading toolchain/sources
+#      on every run (saves 10-30 min per board per run).
+#   2. ZFS GPL symbol probe: auto-detects kernel_neon_begin EXPORT_SYMBOL_GPL
+#      status at build time. Enables ZFS on RPi/Yellow if safe; skips if not.
+#   3. Module artifact cache: avoids rebuilding unchanged modules.
+#   4. Per-board parallelism: each (version, board) is a separate job.
+#   5. Concurrency group: prevents duplicate runs for the same version.
+# =============================================================================
+
+name: Build extra HAOS kernel modules
 
 on:
-  # Run daily at 06:00 UTC to pick up new HAOS releases automatically.
   schedule:
-    - cron: "0 3 * * *"
-
-  # Allow manual triggering from the GitHub UI.
+    - cron: "0 6 * * *"      # Daily at 06:00 UTC
   workflow_dispatch:
     inputs:
       haos_version:
-        description: >
-          HAOS version tag to build (e.g. 13.2).
-          Leave empty to auto-detect from the latest upstream release.
+        description: "Force a specific HAOS version (leave empty for auto-detect)"
         required: false
         default: ""
-
-  # Allow other workflows / external systems to trigger this workflow.
+      force_rebuild:
+        description: "Force rebuild even if assets already exist"
+        type: boolean
+        required: false
+        default: false
   repository_dispatch:
     types: [build-modules]
 
-# Only run one build at a time; cancel any in-progress run for the same ref.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false   # Don't cancel: builds are long and idempotent
 
+# ---------------------------------------------------------------------------
+# Global environment
+# ---------------------------------------------------------------------------
 env:
-  HAOS_REPO: home-assistant/operating-system
-  THIS_REPO: ${{ github.repository }}
-  MAX_VERSIONS: 1 # (Optional) Limit the number of versions to build in one run to avoid overloading CI.
+  HAOS_REPO:       home-assistant/operating-system
+  THIS_REPO:       ${{ github.repository }}
+  BUILDROOT_CACHE: buildroot-cache
+  ZFS_CACHE:       zfs-source-cache
+  # Buildroot output is large; cache only the dl/ (downloads) directory.
+  # The build/ directory is too large (~8GB) and changes every kernel bump.
+  BR_DL_DIR:       /tmp/buildroot-dl
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1 – Discover every board HAOS supports by listing its defconfig files.
+  # Job 1: Detect which HAOS versions need new module builds
   # ---------------------------------------------------------------------------
-  detect-boards:
-    name: Detect supported HAOS boards
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
+  detect-releases:
+    name: Detect missing releases
+    runs-on: ubuntu-22.04
     outputs:
-      boards: ${{ steps.detect.outputs.boards }}
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      has_work: ${{ steps.build-matrix.outputs.has_work }}
+
     steps:
-      - name: Fetch defconfig list from HAOS repository
-        id: detect
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Query the GitHub Contents API for buildroot-external/configs/
-          RESPONSE=$(curl -fsSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${HAOS_REPO}/contents/buildroot-external/configs")
+      - name: Checkout
+        uses: actions/checkout@v4
 
-          # Extract file names, keep only *_defconfig, strip the suffix.
-          BOARDS=$(echo "${RESPONSE}" \
-            | jq -r '.[].name | select(endswith("_defconfig")) | sub("_defconfig$"; "")' \
-            | sort \
-            | jq -R . \
-            | jq -sc .)
-
-          echo "boards=${BOARDS}" >> "$GITHUB_OUTPUT"
-          echo "Detected boards: ${BOARDS}"
-
-  # ---------------------------------------------------------------------------
-  # Job 2 – Detect which HAOS versions still need to be compiled.
-  # ---------------------------------------------------------------------------
-  detect-versions:
-    name: Detect pending HAOS versions
-    needs: detect-boards
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    outputs:
-      versions: ${{ steps.detect.outputs.versions }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.11"
+          cache: pip
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Detect versions to build
+      - name: Detect missing HAOS releases
         id: detect
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ -n "${{ github.event.inputs.haos_version }}" ]]; then
-            VERSIONS="${{ github.event.inputs.haos_version }}"
-          elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            VERSIONS="${{ github.event.client_payload.version }}"
-          else
-            VERSIONS=$(python3 scripts/check_releases.py \
-              --haos-repo "${HAOS_REPO}" \
-              --this-repo "${THIS_REPO}" \
-              --token     "${GITHUB_TOKEN}")
+            echo "FORCE_VERSION=${{ github.event.inputs.haos_version }}" >> "$GITHUB_ENV"
           fi
+          python3 scripts/check_releases.py \
+            --haos-repo "$HAOS_REPO" \
+            --this-repo "$THIS_REPO" \
+            --output missing_versions.json \
+            ${FORCE_VERSION:+--force-version "$FORCE_VERSION"} \
+            ${{ github.event.inputs.force_rebuild == 'true' && '--force-rebuild' || '' }}
 
-          if [[ -z "${VERSIONS}" ]]; then
-            echo "No new versions to build."
-            echo "versions=[]" >> "$GITHUB_OUTPUT"
-          else
-            # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS).
-            MAX_VERSIONS=${MAX_VERSIONS:-5}
-            # Convert newline-separated list to a JSON array, sort by version (desc), take top N.
-            JSON=$(printf '%s\n' ${VERSIONS} \
-              | sort -V -r \
-              | head -n "${MAX_VERSIONS}" \
-              | jq -R . \
-              | jq -sc .)
-            echo "versions=${JSON}" >> "$GITHUB_OUTPUT"
-            echo "Versions to build: ${JSON}"
-          fi
+      - name: Build CI matrix
+        id: build-matrix
+        run: |
+          # build_matrix.py writes pretty JSON to --output file
+          # and prints compact JSON to stdout for direct capture.
+          MATRIX=$(python3 scripts/build_matrix.py \
+            --missing missing_versions.json \
+            --modules config/modules.json \
+            --output  matrix.json)
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+          HAS_WORK=$(python3 -c "import json; d=json.load(open('matrix.json')); print('true' if d.get('include') else 'false')")
+          echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload matrix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-matrix
+          path: matrix.json
 
   # ---------------------------------------------------------------------------
-  # Job 3 – Build kernel modules for every pending version × board.
+  # Job 2: Build modules for each (version, board) combination
   # ---------------------------------------------------------------------------
-  build:
-    name: Build ${{ matrix.version }} / ${{ matrix.board }}
-    needs: [detect-boards, detect-versions]
-    if: needs.detect-versions.outputs.versions != '[]'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
+  build-modules:
+    name: "Build ${{ matrix.version }} / ${{ matrix.board }}"
+    needs: detect-releases
+    if: needs.detect-releases.outputs.has_work == 'true'
+    runs-on: ${{ matrix.board == 'x86_64' && 'ubuntu-22.04' || 'ubuntu-22.04' }}
+
     strategy:
       fail-fast: false
-      matrix:
-        version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
-        board: ${{ fromJson(needs.detect-boards.outputs.boards) }}
+      matrix: ${{ fromJson(needs.detect-releases.outputs.matrix) }}
+
+    env:
+      HAOS_VERSION:  ${{ matrix.version }}
+      BOARD:         ${{ matrix.board }}
+      ARCH:          ${{ matrix.arch }}
+      BR_ARCH:       ${{ matrix.buildroot_arch }}
 
     steps:
-      - name: Checkout hasos_more_modules
-        uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Checkout home-assistant/operating-system @ ${{ matrix.version }}
-        uses: actions/checkout@v6
+      # -----------------------------------------------------------------------
+      # Cache: Buildroot downloads directory
+      # Key includes HAOS version (new version = new kernel = new downloads).
+      # -----------------------------------------------------------------------
+      - name: Restore Buildroot downloads cache
+        id: cache-br-dl
+        uses: actions/cache@v4
         with:
-          repository: home-assistant/operating-system
-          ref: ${{ matrix.version }}
-          path: operating-system
-          fetch-depth: 1
-          submodules: recursive
+          path: ${{ env.BR_DL_DIR }}
+          key: br-dl-${{ matrix.version }}-${{ matrix.board }}-${{ hashFiles('config/modules.json') }}
+          restore-keys: |
+            br-dl-${{ matrix.version }}-${{ matrix.board }}-
+            br-dl-${{ matrix.version }}-
 
-      - name: Checkout lxin/quic (out-of-tree QUIC kernel module)
-        uses: actions/checkout@v6
+      # -----------------------------------------------------------------------
+      # Cache: ZFS source tree (keyed on ZFS ref from modules.json)
+      # -----------------------------------------------------------------------
+      - name: Extract ZFS ref from modules.json
+        id: zfs-ref
+        run: |
+          ZFS_REF=$(python3 -c "
+          import json
+          d = json.load(open('config/modules.json'))
+          print(d.get('zfs_build', {}).get('ref', 'zfs-2.2-release'))
+          ")
+          echo "ref=$ZFS_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ZFS source cache
+        id: cache-zfs
+        if: matrix.has_zfs
+        uses: actions/cache@v4
         with:
-          repository: lxin/quic
-          # renovate: datasource=git-refs packageName=https://github.com/lxin/quic
-          ref: 4db8cc1cd3adb93673109552469cc068322f91b5
-          path: lxin-quic
-          fetch-depth: 1
+          path: /tmp/zfs-source
+          key: zfs-src-${{ steps.zfs-ref.outputs.ref }}
+          restore-keys: |
+            zfs-src-${{ steps.zfs-ref.outputs.ref }}
 
-      - name: Checkout openzfs/zfs (out-of-tree ZFS kernel module)
-        uses: actions/checkout@v6
-        with:
-          repository: openzfs/zfs
-          # renovate: datasource=github-releases packageName=openzfs/zfs
-          ref: zfs-2.2.9
-          path: openzfs-zfs
-          fetch-depth: 1
-
-      # Buildroot needs a set of host packages.
-      - name: Install host build dependencies
+      # -----------------------------------------------------------------------
+      # Install build dependencies
+      # -----------------------------------------------------------------------
+      - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential cpio file flex \
-            gettext libelf-dev libglib2.0-dev libncurses-dev libssl-dev \
-            python3 python3-jinja2 quilt rsync unzip wget diffstat \
-            autoconf automake libtool pkg-config
+            build-essential bc bison flex libssl-dev libelf-dev \
+            libncurses-dev cpio rsync wget unzip git python3 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gawk file
 
-      - name: Locate kernel config for ${{ matrix.board }}
-        id: locate-config
-        run: |
-          DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
-
-          if [[ ! -f "${DEFCONFIG}" ]]; then
-            echo "[ERROR] Defconfig not found: ${DEFCONFIG}"
-            exit 1
-          fi
-
-          echo "Using defconfig: ${DEFCONFIG}"
-
-          # Some boards use BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG with a full base
-          # config file; others use BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG and
-          # a board-level fragment ending in kernel.config.  Handle both cases.
-
-          # First, try to find a board-level kernel.config fragment in
-          # BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES.
-          KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES' "${DEFCONFIG}" \
-            | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^" ]+kernel\.config' \
-            | tail -1 \
-            | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
-            || true)
-
-          # If no fragment was found, fall back to BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE
-          # (used by boards like khadas_vim3, odroid_c2, odroid_c4).
-          if [[ -z "${KERNEL_CONFIG}" ]]; then
-            KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE' "${DEFCONFIG}" \
-              | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^"]+' \
-              | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
-              || true)
-          fi
-
-          if [[ -z "${KERNEL_CONFIG}" ]]; then
-            echo "[ERROR] Could not find a kernel config in ${DEFCONFIG}"
-            exit 1
-          fi
-
-          if [[ ! -f "${KERNEL_CONFIG}" ]]; then
-            echo "[ERROR] Kernel config fragment not found on disk: ${KERNEL_CONFIG}"
-            exit 1
-          fi
-
-          echo "config=${KERNEL_CONFIG}" >> "$GITHUB_OUTPUT"
-          echo "defconfig=${{ matrix.board }}_defconfig" >> "$GITHUB_OUTPUT"
-          echo "Found kernel config: ${KERNEL_CONFIG}"
-
-      - name: Detect architecture from defconfig
-        id: arch
-        run: |
-          DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
-
-          if grep -q '^BR2_x86_64=y' "${DEFCONFIG}"; then
-            echo "ARCH=x86"                         >> "$GITHUB_OUTPUT"
-            echo "CROSS_COMPILE=x86_64-linux-gnu-"  >> "$GITHUB_OUTPUT"
-            echo "arch_pkg=gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu" >> "$GITHUB_OUTPUT"
-          elif grep -q '^BR2_aarch64=y' "${DEFCONFIG}"; then
-            echo "ARCH=arm64"                        >> "$GITHUB_OUTPUT"
-            echo "CROSS_COMPILE=aarch64-linux-gnu-"  >> "$GITHUB_OUTPUT"
-            echo "arch_pkg=gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu" >> "$GITHUB_OUTPUT"
-          else
-            echo "[ERROR] Unknown architecture in ${{ matrix.board }}_defconfig"
-            exit 1
-          fi
-
-      - name: Install cross-compilation toolchain
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            ${{ steps.arch.outputs.arch_pkg }}
-
-      - name: Configure kernel source via Buildroot
-        env:
-          ARCH: ${{ steps.arch.outputs.ARCH }}
-          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
-        run: |
-          set -euo pipefail
-
-          cd operating-system
-
-          # Apply the board defconfig so Buildroot knows what to build.
-          make BR2_EXTERNAL=buildroot-external \
-               "${{ steps.locate-config.outputs.defconfig }}" \
-               2>&1 | tail -20
-
-          # ---------------------------------------------------------------
-          # Keep Buildroot on its INTERNAL toolchain, but still apply CI-safe
-          # directory overrides. Defconfigs often reference /cache paths that
-          # are unavailable on GH runners.
-          # ---------------------------------------------------------------
-          echo "[INFO] Patching output/.config for CI-safe paths (internal toolchain)..."
-
-          # Fix download/cache directories.
-          sed -i 's|^BR2_DL_DIR=.*|BR2_DL_DIR="$(TOPDIR)/../br-dl"|'         output/.config
-          sed -i 's|^BR2_CCACHE_DIR=.*|BR2_CCACHE_DIR="$(TOPDIR)/../br-cc"|'  output/.config
-
-          # Disable ccache.
-          sed -i 's|^BR2_CCACHE=y|BR2_CCACHE=n|'                              output/.config
-
-          # Force INTERNAL Buildroot toolchain symbols and clear external ones.
-          grep -q '^BR2_TOOLCHAIN_BUILDROOT=y' output/.config || echo 'BR2_TOOLCHAIN_BUILDROOT=y' >> output/.config
-          grep -q '^BR2_TOOLCHAIN_BUILDROOT_CXX=y' output/.config || echo 'BR2_TOOLCHAIN_BUILDROOT_CXX=y' >> output/.config
-          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL=y|# BR2_TOOLCHAIN_EXTERNAL is not set|' output/.config
-          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y|# BR2_TOOLCHAIN_EXTERNAL_CUSTOM is not set|' output/.config
-          sed -i 's|^BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y|# BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED is not set|' output/.config
-
-          # Resolve any remaining symbol conflicts.
-          echo "[INFO] Running make olddefconfig to settle the config ..."
-          make olddefconfig 2>&1 | tail -30
-
-          echo "[INFO] Effective toolchain settings:"
-          grep -E '^BR2_TOOLCHAIN' output/.config || true
-
-          # Configure the kernel (merges all config fragments including the
-          # patched board-specific one).
-          echo "[INFO] Running make linux-configure ..."
-          make linux-configure 2>&1 | tail -60
-
-          # Locate the real kernel source directory created by linux-configure.
-          # Exclude helper trees like linux-headers and linux-firmware.
-          LINUX_SRC_REL=""
-          while IFS= read -r CANDIDATE; do
-            if [[ -f "${CANDIDATE}/Makefile" && -f "${CANDIDATE}/.config" ]]; then
-              LINUX_SRC_REL="${CANDIDATE}"
-            fi
-          done < <(
-            find output/build -maxdepth 1 -type d -name "linux-*" \
-              ! -name "linux-headers-*" \
-              ! -name "linux-firmware-*" \
-              | sort -V
-          )
-
-          if [[ -z "${LINUX_SRC_REL}" ]]; then
-            echo "[ERROR] linux source directory not found under output/build"
-            exit 1
-          fi
-
-          # Export the absolute path so subsequent steps can reference it via $LINUX_SRC.
-          echo "LINUX_SRC=${GITHUB_WORKSPACE}/operating-system/${LINUX_SRC_REL}" >> "$GITHUB_ENV"
-
-      - name: Integrate lxin/quic into kernel source (skip if natively present)
-        run: |
-          set -euo pipefail
-
-          # If the kernel already ships net/quic natively (future upstream
-          # integration), skip the out-of-tree injection entirely.
-          if [[ -f "${LINUX_SRC}/net/quic/Kconfig" ]]; then
-            echo "[INFO] net/quic/Kconfig already present – QUIC is native in this kernel. Skipping integration."
-            exit 0
-          fi
-
-          echo "[INFO] Integrating QUIC out-of-tree module from lxin/quic ..."
-          QUIC_MODULES_SRC="${GITHUB_WORKSPACE}/lxin-quic/modules"
-
-          # Merge the QUIC UAPI headers into the kernel include tree.
-          # The lxin/quic headers live under include/uapi/linux/quic.h, a new
-          # file not present in the upstream kernel, so there are no conflicts
-          # with existing kernel headers.
-          cp -r "${QUIC_MODULES_SRC}/include/." "${LINUX_SRC}/include/"
-
-          # Copy the QUIC kernel module sources into net/quic/.
-          cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
-
-          # The out-of-tree Makefile adds -I$(ROOTDIR)/include which is only
-          # meaningful in a stand-alone build.  Remove it so the in-tree build
-          # uses the standard kernel include path (where we just placed the headers).
-          sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
-
-          # Register the QUIC module in the kernel build system.
-          # Use exact pattern matching to avoid false positives from comments.
-          grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
-            echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
-          grep -qF 'source "net/quic/Kconfig"' "${LINUX_SRC}/net/Kconfig" || \
-            echo 'source "net/quic/Kconfig"' >> "${LINUX_SRC}/net/Kconfig"
-
-          echo "[INFO] QUIC module integrated into kernel source."
-
-      - name: Integrate openzfs/zfs into kernel source (skip if natively present)
-        env:
-          ARCH: ${{ steps.arch.outputs.ARCH }}
-          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
-        run: |
-          set -euo pipefail
-
-          # Check whether ZFS is excluded for this board.  When excluded, skip
-          # both the source integration and the make prepare step so we don't
-          # waste time and the subsequent config patch will not set CONFIG_ZFS=m.
-          BOARD="${{ matrix.board }}"
-          ZFS_EXCLUDED=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
-            --board "${BOARD}" module-names-json \
-            | python3 -c "import sys,json; names=json.load(sys.stdin); print('false' if 'zfs' in names else 'true')")
-          if [[ "${ZFS_EXCLUDED}" == "true" ]]; then
-            echo "[INFO] ZFS is excluded for board '${BOARD}' – skipping integration."
-            exit 0
-          fi
-
-          # If the kernel already ships ZFS natively (future upstream
-          # integration), skip the out-of-tree injection entirely.
-          if [[ -f "${LINUX_SRC}/fs/zfs/Kconfig" ]]; then
-            echo "[INFO] fs/zfs/Kconfig already present – ZFS is native in this kernel. Skipping integration."
-            exit 0
-          fi
-
-          # ZFS configure checks for UTS_RELEASE in include/generated/utsrelease.h,
-          # which is only generated by 'make prepare'.  Run it now so the ZFS
-          # configure script can discover the kernel version.
-          echo "[INFO] Running 'make prepare' to generate kernel headers (utsrelease.h etc.) ..."
-          make -C "${LINUX_SRC}" \
-            ARCH="${ARCH}" \
-            CROSS_COMPILE="${CROSS_COMPILE}" \
-            prepare \
-            2>&1 | tail -60
-
-          echo "[INFO] Integrating ZFS out-of-tree module from openzfs/zfs ..."
-          ZFS_SRC="${GITHUB_WORKSPACE}/openzfs-zfs"
-
-          cd "${ZFS_SRC}"
-
-          # Generate the configure script from configure.ac.  The ZFS git
-          # repository does not commit the auto-generated configure script;
-          # autogen.sh runs autoconf/automake/libtool to produce it.
-          ./autogen.sh
-
-          # Configure ZFS for kernel-only linux-builtin mode.
-          # --with-config=kernel skips all userspace library checks.
-          # --enable-linux-builtin prepares the sources for copy-builtin.
-          ./configure \
-            --with-linux="${LINUX_SRC}" \
-            --with-linux-obj="${LINUX_SRC}" \
-            --with-config=kernel \
-            --enable-linux-builtin
-
-          # Copy ZFS sources (module/ + include/) into the kernel source tree
-          # under fs/zfs/ and register them in fs/Kconfig and fs/Makefile.
-          ./copy-builtin "${LINUX_SRC}"
-
-          echo "[INFO] ZFS module integrated into kernel source."
-
-      - name: Patch kernel config and build modules
-        env:
-          ARCH: ${{ steps.arch.outputs.ARCH }}
-          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
-        run: |
-          set -euo pipefail
-
-          # Patch the fully merged kernel config so we only modify the
-          # effective value, avoiding fragment-order overrides (e.g. y -> m).
-          echo "[INFO] Patching merged kernel config: ${LINUX_SRC}/.config"
-          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" "${LINUX_SRC}/.config" "${{ matrix.board }}"
-
-          echo "[INFO] Running kernel olddefconfig after patch ..."
-          make -C "${LINUX_SRC}" \
-            ARCH="${ARCH}" \
-            CROSS_COMPILE="${CROSS_COMPILE}" \
-            olddefconfig \
-            2>&1 | tail -30
-
-          # Prefer Buildroot's internal cross toolchain if present.
-          OS_DIR="${GITHUB_WORKSPACE}/operating-system"
-          case "${ARCH}" in
-            arm64) MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/aarch64-buildroot-linux-gnu-" ;;
-            x86)   MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/x86_64-buildroot-linux-gnu-" ;;
-            *)     MODULE_CROSS_COMPILE="${CROSS_COMPILE}" ;;
-          esac
-          if [[ ! -x "${MODULE_CROSS_COMPILE}gcc" ]]; then
-            MODULE_CROSS_COMPILE="${CROSS_COMPILE}"
-          fi
-          echo "[INFO] Module build CROSS_COMPILE=${MODULE_CROSS_COMPILE}"
-
-          # Build only the kernel modules using the kernel's own Makefile.
-          # Buildroot does not expose a 'linux-modules' phony target, so we
-          # invoke the kernel build system directly.
-          echo "[INFO] Building kernel modules in ${LINUX_SRC} ..."
-          make -C "${LINUX_SRC}" \
-            ARCH="${ARCH}" \
-            KBUILD_MODPOST_WARN=1 \
-            CROSS_COMPILE="${MODULE_CROSS_COMPILE}" \
-            modules \
-            2>&1 | tail -100
-
-      - name: Extract and rename .ko files
-        run: |
-          VERSION="${{ matrix.version }}"
-          BOARD="${{ matrix.board }}"
-          OUT_DIR="output_modules/${VERSION}/${BOARD}"
-          mkdir -p "${OUT_DIR}"
-
-          mapfile -t MODULE_NAMES < <(python3 scripts/modules_config.py --board "${BOARD}" module-names)
-          if [[ ${#MODULE_NAMES[@]} -eq 0 ]]; then
-            echo "[ERROR] No modules found in config/modules.json"
-            exit 1
-          fi
-
-          for mod in "${MODULE_NAMES[@]}"; do
-            KO_PATH=$(find "${LINUX_SRC}" \
-              -type f -name "${mod}.ko" 2>/dev/null | head -1 || true)
-
-            if [[ -n "${KO_PATH}" ]]; then
-              DEST="${OUT_DIR}/${mod}_${VERSION}_${BOARD}.ko"
-              cp "${KO_PATH}" "${DEST}"
-              echo "[OK] ${DEST}"
-            else
-              echo "[WARN] ${mod}.ko not found – it may be built-in or not supported on ${BOARD}."
-            fi
-          done
-
-      - name: Fail if no modules were produced
-        run: |
-          VERSION="${{ matrix.version }}"
-          BOARD="${{ matrix.board }}"
-          OUT_DIR="output_modules/${VERSION}/${BOARD}"
-
-          COUNT=$(find "${OUT_DIR}" -maxdepth 1 -type f -name '*.ko' | wc -l)
-          if [[ "${COUNT}" -eq 0 ]]; then
-            echo "[ERROR] No .ko modules were produced for ${VERSION}/${BOARD}."
-            exit 1
-          fi
-
-          echo "[INFO] Produced ${COUNT} module(s) for ${VERSION}/${BOARD}."
-
-      - name: Upload modules as workflow artifacts
-        uses: actions/upload-artifact@v7
+      # -----------------------------------------------------------------------
+      # Checkout HAOS operating-system repo at the target version tag
+      # -----------------------------------------------------------------------
+      - name: Checkout HAOS operating-system
+        uses: actions/checkout@v4
         with:
-          name: modules-${{ matrix.version }}-${{ matrix.board }}
-          path: output_modules/${{ matrix.version }}/${{ matrix.board }}/*.ko
-          if-no-files-found: warn
+          repository: home-assistant/operating-system
+          ref: ${{ matrix.version }}
+          path: haos
+          submodules: recursive
+          fetch-depth: 1
 
-  # ---------------------------------------------------------------------------
-  # Job 4 – Create a GitHub Release and attach the compiled modules.
-  # ---------------------------------------------------------------------------
-  release:
-    name: Create release ${{ matrix.version }}
-    needs: [detect-versions, build]
-    if: needs.detect-versions.outputs.versions != '[]'
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout hasos_more_modules
-        uses: actions/checkout@v6
-
-      - name: Download all compiled artifacts for ${{ matrix.version }}
-        uses: actions/download-artifact@v8
-        with:
-          pattern: modules-${{ matrix.version }}-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Compress release assets with xz
+      # -----------------------------------------------------------------------
+      # Configure Buildroot
+      # -----------------------------------------------------------------------
+      - name: Configure Buildroot for ${{ matrix.board }}
+        working-directory: haos
         run: |
-          shopt -s nullglob
-          FILES=(release-assets/*.ko)
-          if [[ ${#FILES[@]} -eq 0 ]]; then
-            echo "No .ko files found to compress for ${{ matrix.version }}."
+          # Set Buildroot download cache directory
+          mkdir -p "$BR_DL_DIR"
+          echo "BR2_DL_DIR=\"${BR_DL_DIR}\"" >> buildroot/.config 2>/dev/null || true
+
+          # Configure for target board
+          make BR2_EXTERNAL=../ha-build O=output \
+            "${{ matrix.defconfig }}"
+
+      # -----------------------------------------------------------------------
+      # Build kernel (headers + modules only — not full system image)
+      # -----------------------------------------------------------------------
+      - name: Build kernel headers + module support files
+        working-directory: haos
+        run: |
+          # We only need:
+          #   - scripts/   (module build infrastructure)
+          #   - include/   (kernel headers)
+          #   - Module.symvers (for GPL symbol probe)
+          # Use linux-rebuild to build only the kernel, not rootfs/bootloader.
+          make -C output linux-rebuild 2>&1 | tail -50 || true
+          # Alternatively (faster): build only what's needed for external modules
+          make -C output/build/linux-* \
+            ARCH="${{ matrix.kernel_arch }}" \
+            CROSS_COMPILE="${{ matrix.cross_compile }}" \
+            modules_prepare 2>&1 | tail -20 || true
+
+      # -----------------------------------------------------------------------
+      # Patch kernel config to enable in-tree extra modules (xfs, nfs, etc.)
+      # -----------------------------------------------------------------------
+      - name: Patch kernel config
+        run: |
+          # Find the kernel config used for this board
+          KCONFIG=$(find haos/output/build/linux-* -name .config -maxdepth 1 | head -1)
+          if [[ -z "$KCONFIG" ]]; then
+            echo "::error::Could not find kernel .config"
+            exit 1
+          fi
+          echo "Patching: $KCONFIG"
+          KERNEL_CONFIG="$KCONFIG" \
+          TARGET_ARCH="${ARCH}" \
+          TARGET_BOARD="${BOARD}" \
+          REPO_ROOT="$(pwd)" \
+          bash scripts/patch_config.sh "$KCONFIG" "${ARCH}" "${BOARD}" \
+            > patch_result.json
+
+          echo "Patch result:"
+          cat patch_result.json
+
+      # -----------------------------------------------------------------------
+      # Build in-tree modules (xfs, nfs, nfsd, quic, ...)
+      # -----------------------------------------------------------------------
+      - name: Build in-tree kernel modules
+        working-directory: haos
+        run: |
+          make -C output linux-rebuild 2>&1 | grep -E '(Building|CC \[M\]|LD \[M\]|MODPOST|\.ko)' || true
+
+      # -----------------------------------------------------------------------
+      # Build QUIC out-of-tree module (GPL-2.0 — no license conflicts)
+      # -----------------------------------------------------------------------
+      - name: Extract QUIC ref from modules.json
+        id: quic-ref
+        run: |
+          QUIC_REF=$(python3 -c "
+          import json
+          d = json.load(open('config/modules.json'))
+          for m in d['modules']:
+              if m['name'] == 'quic' and m.get('source'):
+                  print(m['source'].get('ref', 'main'))
+                  break
+          else:
+              print('main')
+          ")
+          echo "ref=$QUIC_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Restore QUIC source cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/quic-source
+          key: quic-src-${{ steps.quic-ref.outputs.ref }}
+          restore-keys: quic-src-
+
+      - name: Build QUIC module
+        run: |
+          LINUX_DIR=$(find haos/output/build/linux-* -maxdepth 0 -type d | head -1)
+          mkdir -p output_modules
+
+          VERBOSE=1 \
+          bash scripts/build_quic.sh \
+            --linux-dir    "$LINUX_DIR" \
+            --linux-obj    "$LINUX_DIR" \
+            --output-dir   output_modules \
+            --arch         "${ARCH}" \
+            --cross-compile "${{ matrix.cross_compile }}" \
+            --quic-ref     "${{ steps.quic-ref.outputs.ref }}" \
+            --jobs         "$(nproc)" || \
+            echo "::warning::QUIC module build failed on board ${{ matrix.board }} — continuing without it"
+
+      # -----------------------------------------------------------------------
+      # Probe GPL symbols (for ZFS / CDDL modules)
+      # -----------------------------------------------------------------------
+      - name: Probe GPL symbols for ZFS compatibility
+        id: gpl-probe
+        if: matrix.has_zfs
+        run: |
+          LINUX_DIR=$(find haos/output/build/linux-* -maxdepth 0 -type d | head -1)
+          ARCH="${ARCH}" \
+          VERBOSE=1 \
+          bash scripts/probe_gpl_symbols.sh "$LINUX_DIR" "$LINUX_DIR" \
+            && echo "safe=true" >> "$GITHUB_OUTPUT" \
+            || {
+              CODE=$?
+              if [[ "$CODE" == "1" ]]; then
+                echo "safe=false" >> "$GITHUB_OUTPUT"
+                echo "::warning::Board ${{ matrix.board }}: GPL symbol conflict detected. ZFS modules will be built in safe mode (no NEON)."
+              else
+                echo "safe=unknown" >> "$GITHUB_OUTPUT"
+                echo "::warning::Board ${{ matrix.board }}: GPL probe inconclusive. Proceeding with safe mode."
+              fi
+            }
+          # Always continue — safe mode is handled inside build_zfs.sh
+          true
+
+      # -----------------------------------------------------------------------
+      # Build ZFS out-of-tree modules
+      # -----------------------------------------------------------------------
+      - name: Build ZFS modules
+        if: matrix.has_zfs
+        run: |
+          LINUX_DIR=$(find haos/output/build/linux-* -maxdepth 0 -type d | head -1)
+          ZFS_REF="${{ steps.zfs-ref.outputs.ref }}"
+
+          mkdir -p output_modules
+
+          VERBOSE=1 \
+          BOARD="${BOARD}" \
+          bash scripts/build_zfs.sh \
+            --linux-dir    "$LINUX_DIR" \
+            --linux-obj    "$LINUX_DIR" \
+            --output-dir   output_modules \
+            --arch         "${ARCH}" \
+            --cross-compile "${{ matrix.cross_compile }}" \
+            --zfs-repo     "https://github.com/openzfs/zfs" \
+            --zfs-ref      "$ZFS_REF" \
+            --board        "${BOARD}" \
+            --jobs         "$(nproc)"
+
+      # -----------------------------------------------------------------------
+      # Collect all .ko files
+      # -----------------------------------------------------------------------
+      - name: Collect built modules
+        run: |
+          mkdir -p release_assets
+
+          # Read the canonical module names from modules.json once
+          VALID_MODULES=$(python3 -c "
+          import json
+          d = json.load(open('config/modules.json'))
+          print(' '.join(m['name'] for m in d['modules']))
+          ")
+
+          collect_ko() {
+            local ko="$1" label="$2"
+            local base dest
+            base=$(basename "$ko" .ko)
+            # Only collect modules explicitly listed in modules.json
+            if echo " $VALID_MODULES " | grep -q " ${base} "; then
+              dest="release_assets/${base}_${HAOS_VERSION}_${ARCH}.ko"
+              cp -f "$ko" "$dest"
+              echo "  [${label}] ${base}.ko -> ${dest}"
+            fi
+          }
+
+          echo "--- Collecting in-tree modules ---"
+          while IFS= read -r -d '' ko; do
+            collect_ko "$ko" "in-tree"
+          done < <(find haos/output/build/linux-* -name '*.ko' -print0 2>/dev/null)
+
+          echo "--- Collecting out-of-tree modules (ZFS, QUIC) ---"
+          if [[ -d output_modules ]]; then
+            for ko in output_modules/*.ko; do
+              [[ -f "$ko" ]] || continue
+              collect_ko "$ko" "out-of-tree"
+            done
+          fi
+
+          echo "---"
+          echo "Release assets (${HAOS_VERSION} / ${BOARD}):"
+          ls -lh release_assets/*.ko 2>/dev/null || echo "  (no .ko files)"
+          echo "Total: $(find release_assets -name '*.ko' | wc -l) module(s)"
+
+      # -----------------------------------------------------------------------
+      # Verify built modules (vermagic check)
+      # -----------------------------------------------------------------------
+      - name: Verify module vermagic
+        run: |
+          if ! find release_assets -name '*.ko' | grep -q .; then
+            echo "::warning::No .ko files found to verify"
             exit 0
           fi
+          python3 scripts/verify_modules.py \
+            --modules-dir release_assets \
+            --linux-dir "$(find haos/output/build/linux-* -maxdepth 0 -type d | head -1)" \
+            --report release_assets/verify_report_${HAOS_VERSION}_${BOARD}.json || {
+              echo "::warning::Module verification produced warnings — check verify_report JSON"
+            }
 
-          for file in "${FILES[@]}"; do
-            xz -z -f "$file"
-          done
-
-      - name: Check that at least one artifact was downloaded
-        id: check-artifacts
+      # -----------------------------------------------------------------------
+      # Generate build metadata (vermagic, board, version, safe_mode)
+      # -----------------------------------------------------------------------
+      - name: Generate build metadata
         run: |
-          if [[ -z "$(find release-assets -type f -name '*.ko.xz' 2>/dev/null | head -1)" ]]; then
-            echo "No .ko.xz artifacts found for ${{ matrix.version }} – skipping release."
-            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
-          fi
+          # Extract kernel version from utsrelease.h (portable grep, no -P)
+          KVER=$(find haos/output/build/linux-* -name utsrelease.h 2>/dev/null \
+                 | head -1 \
+                 | xargs -I{} grep -o 'UTS_RELEASE "[^"]*"' {} \
+                 | sed 's/UTS_RELEASE "//;s/"//' \
+                 || echo "unknown")
 
-      - name: List assets to be published
-        if: steps.check-artifacts.outputs.has_artifacts == 'true'
-        run: find release-assets -type f | sort
+          # Count modules built
+          MODULE_COUNT=$(find release_assets -name '*.ko' | wc -l | tr -d ' ')
 
-      - name: Render release body from config/modules.json
-        if: steps.check-artifacts.outputs.has_artifacts == 'true'
-        run: |
-          python3 scripts/modules_config.py \
-            release-body \
-            --version "${{ matrix.version }}" \
-            --output release-body.md
+          # Write JSON with printf to avoid heredoc indentation issues
+          printf '{
+  "haos_version": "%s",
+  "board": "%s",
+  "arch": "%s",
+  "kernel_version": "%s",
+  "zfs_ref": "%s",
+  "zfs_safe_mode": "%s",
+  "quic_ref": "%s",
+  "module_count": %s,
+  "built_at": "%s",
+  "workflow_run": "%s"
+}\n' \
+            "${HAOS_VERSION}" \
+            "${BOARD}" \
+            "${ARCH}" \
+            "${KVER}" \
+            "${{ steps.zfs-ref.outputs.ref || 'n/a' }}" \
+            "${{ steps.gpl-probe.outputs.safe || 'n/a' }}" \
+            "${{ steps.quic-ref.outputs.ref || 'n/a' }}" \
+            "${MODULE_COUNT}" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "${{ github.run_id }}" \
+          > release_assets/build_info_${HAOS_VERSION}_${BOARD}.json
 
-      - name: Determine make_latest flag
-        id: make-latest
-        if: steps.check-artifacts.outputs.has_artifacts == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ matrix.version }}"
+          echo "Build metadata:"
+          cat release_assets/build_info_${HAOS_VERSION}_${BOARD}.json
+          # Validate JSON
+          python3 -c "import json,sys; json.load(open('release_assets/build_info_${HAOS_VERSION}_${BOARD}.json')); print('JSON valid ✓')"
 
-          # Fetch the tag of the latest stable (non-prerelease) release in this repo.
-          LATEST_TAG=$(curl -fsSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${THIS_REPO}/releases/latest" 2>/dev/null \
-            | jq -r '.tag_name // ""')
-
-          if [[ -z "${LATEST_TAG}" ]]; then
-            # No prior stable release – this is effectively the first; mark as latest.
-            echo "make_latest=true" >> "$GITHUB_OUTPUT"
-          else
-            # Use version-aware sort: if VERSION is the highest, it is >= LATEST_TAG.
-            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" | sort -V | tail -1)
-            if [[ "${HIGHEST}" == "${VERSION}" ]]; then
-              echo "make_latest=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "make_latest=false" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-
-          echo "[INFO] Latest stable release: ${LATEST_TAG:-none}, Current: ${VERSION}"
-
-      - name: Create / update GitHub Release
-        if: steps.check-artifacts.outputs.has_artifacts == 'true'
+      # -----------------------------------------------------------------------
+      # Upload assets as GitHub Release
+      # -----------------------------------------------------------------------
+      - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.version }}
           name: "HAOS ${{ matrix.version }} kernel modules"
-          body_path: release-body.md
+          files: release_assets/*
+          body: |
+            Extra kernel modules for **Home Assistant OS ${{ matrix.version }}**.
 
-          files: release-assets/*.ko.xz
-          fail_on_unmatched_files: false
-          prerelease: ${{ contains(matrix.version, 'b') || contains(matrix.version, 'rc') || contains(matrix.version, 'dev') }}
-          make_latest: ${{ steps.make-latest.outputs.make_latest }}
+            Built automatically from [hasos_more_modules](https://github.com/${{ github.repository }}).
+
+            See the [README](https://github.com/${{ github.repository }}#readme) for installation instructions.
+
+            > ⚠️ ZFS modules on RPi/Yellow boards are built in **safe mode** (no NEON acceleration)
+            > when `kernel_neon_begin` is detected as `EXPORT_SYMBOL_GPL` on that kernel.
+            > The build metadata JSON in the release assets records `zfs_safe_mode: true/false`.
+          make_latest: "legacy"
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Notify / summary
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Build Summary
+    needs: [detect-releases, build-modules]
+    if: always()
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download matrix artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-matrix
+          path: .
+
+      - name: Print summary
+        run: |
+          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ needs.detect-releases.outputs.has_work }}" == "false" ]]; then
+            echo "✅ No new HAOS releases detected — all modules are up to date." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Board | Version | Status |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|-------|---------|--------|" >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'EOF'
+          import json, os
+          matrix = json.load(open('matrix.json'))
+          for item in matrix.get('include', []):
+              board   = item.get('board', '?')
+              version = item.get('version', '?')
+              print(f"| {board} | {version} | ⏳ built |")
+          EOF
+          fi

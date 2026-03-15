@@ -1,247 +1,307 @@
-#!/usr/bin/env python3
-"""Utilities for reading module/config metadata from config/modules.json.
+"""
+scripts/modules_config.py
+=========================
+Shared library for reading and querying config/modules.json.
 
-The file is stored as JSON-compatible YAML so we can parse it with Python's
-standard library only.
+All other scripts (check_releases, build_matrix, update_readme, patch_config)
+import from here to keep the single-source-of-truth contract.
+
+Usage example:
+    from modules_config import ModulesConfig
+    cfg = ModulesConfig()
+    for mod in cfg.modules_for_board("rpi4_64", arch="aarch64"):
+        print(mod.name)
 """
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Iterator, Optional
+
+# ---------------------------------------------------------------------------
+# Default path resolution
+# ---------------------------------------------------------------------------
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT   = _SCRIPT_DIR.parent
+_DEFAULT_MODULES_JSON = _REPO_ROOT / "config" / "modules.json"
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = REPO_ROOT / "config" / "modules.json"
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+class ExcludeKind(Enum):
+    """
+    NONE        - module can be built for this board
+    HARD        - board can never build this module (hardware/arch impossibility)
+    SOFT_NEON   - excluded only if GPL probe detects kernel_neon_begin as GPL-only
+    """
+    NONE      = "none"
+    HARD      = "hard"
+    SOFT_NEON = "soft_neon"
 
 
-def load_config(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
-
-    if not isinstance(data, dict):
-        raise ValueError("Top-level config must be an object")
-
-    modules = data.get("modules")
-    if not isinstance(modules, list):
-        raise ValueError("'modules' must be an array")
-
-    for idx, module in enumerate(modules):
-        if not isinstance(module, dict):
-            raise ValueError(f"modules[{idx}] must be an object")
-        for key in ("name", "artifact", "description", "configs"):
-            if key not in module:
-                raise ValueError(f"modules[{idx}] missing '{key}'")
-        exclude_boards = module.get("exclude_boards")
-        if exclude_boards is not None and not isinstance(exclude_boards, list):
-            raise ValueError(f"modules[{idx}] 'exclude_boards' must be a list")
-        exclude_reason = module.get("exclude_reason")
-        if exclude_reason is not None and not isinstance(exclude_reason, str):
-            raise ValueError(f"modules[{idx}] 'exclude_reason' must be a string")
-
-    return data
+@dataclass
+class ModuleSource:
+    repo:    str
+    ref:     str
+    kind:    str          # "zfs_module" | "external" | ""
+    subdir:  str = ""
 
 
-def _is_excluded(module: dict[str, Any], board: str | None) -> bool:
-    """Return True when *module* should be skipped for *board*."""
-    if board is None:
-        return False
-    return board in module.get("exclude_boards", [])
+@dataclass
+class Module:
+    name:        str
+    description: str
+    kconfig:     list[str]
+    license:     str
+    notes:       str
+    source:      Optional[ModuleSource]
+    # boards listed in exclude_boards.hard
+    hard_excluded_boards:      list[str]
+    # boards listed in exclude_boards.soft_neon
+    soft_neon_excluded_boards: list[str]
+    build_flags_by_arch:       dict
+
+    # -----------------------------------------------------------------------
+    @property
+    def is_external(self) -> bool:
+        """True if this module is built out-of-tree (ZFS, QUIC, …)."""
+        return self.source is not None and self.source.kind in ("zfs_module", "external")
+
+    @property
+    def is_zfs(self) -> bool:
+        return self.source is not None and self.source.kind == "zfs_module"
+
+    def exclude_kind_for(self, board: str) -> ExcludeKind:
+        """Return the exclusion kind for the given board name."""
+        if board in self.hard_excluded_boards:
+            return ExcludeKind.HARD
+        if board in self.soft_neon_excluded_boards:
+            return ExcludeKind.SOFT_NEON
+        return ExcludeKind.NONE
+
+    def is_buildable_for(self, board: str, gpl_safe: bool = True) -> bool:
+        """
+        Return True if this module can be built for board.
+
+        gpl_safe:
+            True  = kernel probe passed (no GPL-only NEON symbols)
+            False = probe detected GPL conflict (safe-mode required for ZFS)
+
+        In safe mode, ZFS *can still be built* (with NEON disabled);
+        it is not excluded — the workflow records `zfs_safe_mode=true`.
+        """
+        kind = self.exclude_kind_for(board)
+        if kind == ExcludeKind.HARD:
+            return False
+        # SOFT_NEON: buildable in safe mode even when gpl_safe=False
+        return True
 
 
-def normalize_assignments(
-    data: dict[str, Any], board: str | None = None
-) -> list[dict[str, str]]:
-    assignments: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    def add_entry(entry: Any) -> None:
-        if not isinstance(entry, dict):
-            raise ValueError("Config entries must be objects")
-
-        symbol = entry.get("symbol")
-        value = entry.get("value")
-        value_type = entry.get("type", "literal")
-
-        if not isinstance(symbol, str) or not symbol.startswith("CONFIG_"):
-            raise ValueError(f"Invalid symbol: {symbol!r}")
-        if not isinstance(value, str):
-            raise ValueError(f"Invalid value for {symbol}: {value!r}")
-        if value_type not in {"literal", "string"}:
-            raise ValueError(f"Invalid type for {symbol}: {value_type!r}")
-
-        if symbol in seen:
-            return
-        seen.add(symbol)
-        assignments.append({"symbol": symbol, "value": value, "type": value_type})
-
-    for entry in data.get("base_configs", []):
-        add_entry(entry)
-
-    modules = data.get("modules", [])
-    for module in modules:
-        if _is_excluded(module, board):
-            continue
-        for entry in module.get("configs", []):
-            add_entry(entry)
-
-    return assignments
+@dataclass
+class Board:
+    name:        str
+    arch:        str
+    kernel_arch: str
+    defconfig:   str
+    kernel_tree: str   # "upstream" | "rpi"
+    note:        str
 
 
-def module_names(data: dict[str, Any], board: str | None = None) -> list[str]:
-    return [
-        str(module["name"])
-        for module in data.get("modules", [])
-        if not _is_excluded(module, board)
-    ]
+@dataclass
+class ZfsBuildConfig:
+    repo:                  str
+    ref:                   str
+    configure_base:        list[str]
+    configure_aarch64_safe: list[str]
+    tracepoints_disable_cflags: str
+    modules_order:         list[str]
 
 
-def _exclusion_note(module: dict[str, Any]) -> str:
-    """Return a human-readable note about board exclusions, or empty string."""
-    boards = module.get("exclude_boards", [])
-    if not boards:
-        return ""
-    reason = module.get("exclude_reason", "Not supported on these boards.")
-    boards_fmt = ", ".join(f"`{b}`" for b in boards)
-    return f"⚠️ Not available on {boards_fmt}: {reason}"
+# ---------------------------------------------------------------------------
+# Main config class
+# ---------------------------------------------------------------------------
 
+class ModulesConfig:
+    """
+    Loads and exposes config/modules.json with typed accessors.
+    """
 
-def module_rows(data: dict[str, Any]) -> list[str]:
-    rows: list[str] = []
-    for module in data.get("modules", []):
-        artifact = str(module["artifact"])
-        description = str(module["description"])
-        note = _exclusion_note(module)
-        rows.append(f"| `{artifact}` | {description} | {note} |")
-    return rows
+    def __init__(self, path: Path | str | None = None):
+        self._path = Path(path) if path else _DEFAULT_MODULES_JSON
+        with open(self._path) as f:
+            raw = json.load(f)
+        self._raw      = raw
+        self._modules  = self._parse_modules(raw.get("modules", []))
+        self._boards   = self._parse_boards(raw.get("boards", {}))
+        self._zfs      = self._parse_zfs(raw.get("zfs_build", {}))
 
+    # -----------------------------------------------------------------------
+    # Parsers
+    # -----------------------------------------------------------------------
 
-def _excluded_modules_section(data: dict[str, Any]) -> str:
-    """Return a markdown section listing modules excluded per board, or ''."""
-    # Build mapping: board -> list of (artifact, reason)
-    board_map: dict[str, list[tuple[str, str]]] = {}
-    for module in data.get("modules", []):
-        boards = module.get("exclude_boards", [])
-        if not boards:
-            continue
-        artifact = str(module["artifact"])
-        reason = module.get(
-            "exclude_reason", "Not supported on this board."
+    @staticmethod
+    def _parse_modules(raw: list[dict]) -> list[Module]:
+        result = []
+        for m in raw:
+            src_raw = m.get("source")
+            source  = None
+            if src_raw:
+                source = ModuleSource(
+                    repo   = src_raw.get("repo", ""),
+                    ref    = src_raw.get("ref", ""),
+                    kind   = src_raw.get("type", ""),
+                    subdir = src_raw.get("subdir", ""),
+                )
+            exc = m.get("exclude_boards", {})
+            result.append(Module(
+                name        = m["name"],
+                description = m.get("description", ""),
+                kconfig     = m.get("kconfig", []),
+                license     = m.get("license", "unknown"),
+                notes       = m.get("notes", ""),
+                source      = source,
+                hard_excluded_boards      = exc.get("hard", []),
+                soft_neon_excluded_boards = exc.get("soft_neon", []),
+                build_flags_by_arch       = m.get("build_flags_by_arch", {}),
+            ))
+        return result
+
+    @staticmethod
+    def _parse_boards(raw: dict) -> dict[str, Board]:
+        result = {}
+        for name, b in raw.items():
+            result[name] = Board(
+                name        = name,
+                arch        = b.get("arch", ""),
+                kernel_arch = b.get("kernel_arch", ""),
+                defconfig   = b.get("defconfig", ""),
+                kernel_tree = b.get("kernel_tree", "upstream"),
+                note        = b.get("_note", ""),
+            )
+        return result
+
+    @staticmethod
+    def _parse_zfs(raw: dict) -> ZfsBuildConfig:
+        return ZfsBuildConfig(
+            repo                       = raw.get("repo", "https://github.com/openzfs/zfs"),
+            ref                        = raw.get("ref", "zfs-2.2-release"),
+            configure_base             = raw.get("configure_base", []),
+            configure_aarch64_safe     = raw.get("configure_aarch64_safe", []),
+            tracepoints_disable_cflags = raw.get("tracepoints_disable_cflags", "-DZFS_NO_TRACEPOINTS"),
+            modules_order              = raw.get("modules_order", []),
         )
-        for board in boards:
-            board_map.setdefault(board, []).append((artifact, reason))
 
-    if not board_map:
-        return ""
+    # -----------------------------------------------------------------------
+    # Accessors
+    # -----------------------------------------------------------------------
 
-    lines = ["### Board exclusions", ""]
-    for board in sorted(board_map):
-        lines.append(
-            f"**`{board}`** — the following modules are **not** compiled for this board:"
-        )
-        lines.append("")
-        # Collect unique reasons for this board
-        seen_reasons: dict[str, list[str]] = {}
-        for artifact, reason in board_map[board]:
-            seen_reasons.setdefault(reason, []).append(f"`{artifact}`")
-        for reason, artifacts in seen_reasons.items():
-            lines.append(f"- {', '.join(artifacts)}: {reason}")
-        lines.append("")
+    @property
+    def modules(self) -> list[Module]:
+        return list(self._modules)
 
-    return "\n".join(lines)
+    @property
+    def boards(self) -> dict[str, Board]:
+        return dict(self._boards)
+
+    @property
+    def zfs(self) -> ZfsBuildConfig:
+        return self._zfs
+
+    def board(self, name: str) -> Board:
+        if name not in self._boards:
+            raise KeyError(f"Unknown board: {name!r}. Known: {list(self._boards)}")
+        return self._boards[name]
+
+    def modules_for_board(
+        self,
+        board_name: str,
+        arch: str | None = None,
+        *,
+        gpl_safe: bool = True,
+        include_soft_neon: bool = True,
+    ) -> Iterator[tuple[Module, ExcludeKind]]:
+        """
+        Yield (module, ExcludeKind) for all modules that apply to board_name.
+
+        include_soft_neon:
+            True  - include SOFT_NEON excluded modules (they are buildable
+                    in safe mode); caller decides how to handle them.
+            False - skip SOFT_NEON excluded modules (stricter filter).
+        """
+        for mod in self._modules:
+            kind = mod.exclude_kind_for(board_name)
+            if kind == ExcludeKind.HARD:
+                continue
+            if kind == ExcludeKind.SOFT_NEON and not include_soft_neon:
+                continue
+            yield mod, kind
+
+    def zfs_modules(self) -> list[Module]:
+        """Return all modules built from the ZFS source tree."""
+        return [m for m in self._modules if m.is_zfs]
+
+    def in_tree_modules(self) -> list[Module]:
+        """Return modules built directly by the Buildroot kernel build."""
+        return [m for m in self._modules if not m.is_external]
+
+    def external_modules(self) -> list[Module]:
+        """Return out-of-tree modules (ZFS, QUIC, …)."""
+        return [m for m in self._modules if m.is_external]
+
+    def boards_with_rpi_kernel(self) -> list[Board]:
+        """Return boards that use the Raspberry Pi Foundation kernel tree."""
+        return [b for b in self._boards.values() if b.kernel_tree == "rpi"]
+
+    def readme_notes_for(self, mod: Module) -> str:
+        """
+        Return a human-readable notes string for the README module table.
+        Merges soft_neon exclusion info with any explicit notes field.
+        """
+        parts = []
+        if mod.soft_neon_excluded_boards:
+            boards_str = ", ".join(f"`{b}`" for b in sorted(mod.soft_neon_excluded_boards))
+            parts.append(
+                f"⚠️ On {boards_str}: built in **safe mode** "
+                f"(no NEON AES acceleration) when `kernel_neon_begin` is "
+                f"`EXPORT_SYMBOL_GPL` — detected automatically at build time."
+            )
+        if mod.notes and not mod.notes.startswith("⚠️"):
+            parts.append(mod.notes)
+        return " ".join(parts) if parts else ""
 
 
-def release_body(version: str, data: dict[str, Any]) -> str:
-    rows = "\n".join(module_rows(data))
-    excluded_section = _excluded_modules_section(data)
-    body = (
-        "Compiled out-of-tree kernel modules for **Home Assistant OS "
-        f"{version}**.\n\n"
-        "Artifacts are named `{module}_{haos_version}_{board}.ko`.\n\n"
-        "### Included modules\n"
-        "| Module | Description | Notes |\n"
-        "|:--------|:-------------|:------|\n"
-        f"{rows}\n\n"
-    )
-    if excluded_section:
-        body += excluded_section + "\n"
-    body += (
-        "### Supported boards\n"
-        "One set of `.ko` files is provided per board listed below.\n"
-        "Each file is compiled against the **exact** kernel shipped with\n"
-        f"HAOS {version} for that board.  Loading a module on a\n"
-        "different kernel version will fail.\n\n"
-        "See the README for installation instructions.\n"
-    )
-    return body
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Read module build config")
-    parser.add_argument(
-        "--config",
-        default=str(DEFAULT_CONFIG),
-        help="Path to modules.yml (JSON-compatible YAML)",
-    )
-    parser.add_argument(
-        "--board",
-        default=None,
-        help="Target board name; modules with this board in 'exclude_boards' are skipped",
-    )
-
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    sub.add_parser("module-names", help="Print module names, one per line")
-    sub.add_parser("module-names-json", help="Print module names as JSON array")
-    sub.add_parser(
-        "config-assignments-json",
-        help="Print CONFIG assignments as JSON",
-    )
-    sub.add_parser("module-table-rows", help="Print markdown rows for module table")
-
-    body = sub.add_parser("release-body", help="Render release body markdown")
-    body.add_argument("--version", required=True, help="HAOS version")
-    body.add_argument("--output", help="Write output to file instead of stdout")
-
-    return parser
-
-
-def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-
-    data = load_config(Path(args.config))
-    board: str | None = args.board
-
-    if args.command == "module-names":
-        print("\n".join(module_names(data, board)))
-        return 0
-
-    if args.command == "module-names-json":
-        print(json.dumps(module_names(data, board)))
-        return 0
-
-    if args.command == "config-assignments-json":
-        print(json.dumps(normalize_assignments(data, board)))
-        return 0
-
-    if args.command == "module-table-rows":
-        print("\n".join(module_rows(data)))
-        return 0
-
-    if args.command == "release-body":
-        body = release_body(args.version, data)
-        if args.output:
-            Path(args.output).write_text(body, encoding="utf-8")
-        else:
-            print(body)
-        return 0
-
-    parser.error(f"Unknown command: {args.command}")
-    return 2
-
+# ---------------------------------------------------------------------------
+# CLI (for quick inspection)
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import argparse, sys
+
+    parser = argparse.ArgumentParser(description="Inspect modules.json")
+    parser.add_argument("--board",  default="", help="Filter for a specific board")
+    parser.add_argument("--list-boards", action="store_true")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    args = parser.parse_args()
+
+    cfg = ModulesConfig()
+
+    if args.list_boards:
+        for name, b in cfg.boards.items():
+            print(f"  {name:20s}  arch={b.arch:8s}  kernel_tree={b.kernel_tree}")
+        sys.exit(0)
+
+    if args.board:
+        mods = list(cfg.modules_for_board(args.board))
+        print(f"Modules for board '{args.board}' ({len(mods)} total):")
+        for mod, kind in mods:
+            flag = "" if kind == ExcludeKind.NONE else f"  [{kind.value}]"
+            print(f"  {mod.name:20s}  license={mod.license:20s}{flag}")
+    else:
+        for mod in cfg.modules:
+            print(f"  {mod.name:20s}  external={mod.is_external}  zfs={mod.is_zfs}  license={mod.license}")

@@ -1,0 +1,90 @@
+# =============================================================================
+# .github/workflows/update_readme.yml
+#
+# Automatically regenerates the README.md module table whenever
+# config/modules.json is modified (on push to main or via PR).
+#
+# This keeps the documentation in sync with the configuration without
+# requiring manual runs of update_readme_modules.py.
+# =============================================================================
+
+name: Update README module table
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "config/modules.json"
+      - "scripts/update_readme_modules.py"
+      - "scripts/modules_config.py"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "config/modules.json"
+      - "scripts/update_readme_modules.py"
+      - "scripts/modules_config.py"
+  workflow_dispatch:   # allow manual trigger
+
+concurrency:
+  group: update-readme-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-readme:
+    name: Regenerate README module table
+    runs-on: ubuntu-22.04
+    # Only auto-commit on push to main (not on PRs — just validate)
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Use a token that allows pushing back to the repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Regenerate README module table
+        id: regen
+        run: |
+          python3 scripts/update_readme_modules.py \
+            --readme README.md \
+            --modules config/modules.json
+          echo "changed=$(git diff --quiet README.md && echo false || echo true)" >> "$GITHUB_OUTPUT"
+
+      - name: Show diff (for PRs / validation)
+        if: steps.regen.outputs.changed == 'true'
+        run: git diff README.md
+
+      - name: Commit updated README (push to main only)
+        if: |
+          steps.regen.outputs.changed == 'true' &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: auto-update README module table [skip ci]"
+          git push
+
+      - name: Fail if README is out of date on PR
+        if: |
+          steps.regen.outputs.changed == 'true' &&
+          github.event_name == 'pull_request'
+        run: |
+          echo "::error::README module table is out of date."
+          echo "Run 'python3 scripts/update_readme_modules.py' locally and commit the result."
+          exit 1

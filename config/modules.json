@@ -1,136 +1,271 @@
 {
-  "base_configs": [
-    {
-      "symbol": "CONFIG_MODULES",
-      "value": "y"
-    },
-    {
-      "symbol": "CONFIG_LOCALVERSION",
-      "type": "string",
-      "value": "-haos"
-    }
-  ],
+  "_comment": "Single source of truth for extra HAOS kernel modules. Fields: name, description, kconfig (list of CONFIG_* to enable =m), source (optional upstream repo), exclude_boards (boards that CANNOT build this module), build_flags_by_arch (extra make/env flags per arch), license, notes.",
   "modules": [
     {
       "name": "xfs",
-      "artifact": "xfs.ko",
       "description": "XFS filesystem support",
-      "configs": [
-        {
-          "symbol": "CONFIG_XFS_FS",
-          "value": "m"
-        }
-      ]
+      "kconfig": ["CONFIG_XFS_FS"],
+      "license": "GPL-2.0"
     },
     {
       "name": "nfsd",
-      "artifact": "nfsd.ko",
       "description": "NFS server daemon",
-      "configs": [
-        {
-          "symbol": "CONFIG_NFSD",
-          "value": "m"
-        },
-        {
-          "symbol": "CONFIG_NFSD_V4",
-          "value": "y"
-        },
-        {
-          "symbol": "CONFIG_EXPORTFS",
-          "value": "m"
-        }
-      ]
+      "kconfig": [
+        "CONFIG_NFSD",
+        "CONFIG_NFSD_V4",
+        "CONFIG_EXPORTFS"
+      ],
+      "license": "GPL-2.0"
     },
     {
       "name": "nfs",
-      "artifact": "nfs.ko",
       "description": "NFS client support",
-      "configs": [
-        {
-          "symbol": "CONFIG_NFS_FS",
-          "value": "m"
-        }
-      ]
+      "kconfig": [
+        "CONFIG_NFS_FS",
+        "CONFIG_NFS_V4",
+        "CONFIG_SUNRPC"
+      ],
+      "license": "GPL-2.0"
     },
     {
       "name": "quic",
-      "artifact": "quic.ko",
-      "description": "QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic",
-      "configs": [
-        {
-          "symbol": "CONFIG_IP_QUIC",
-          "value": "m"
-        }
-      ]
+      "description": "QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000)",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/lxin/quic",
+        "ref": "main",
+        "type": "external"
+      },
+      "license": "GPL-2.0"
     },
     {
       "name": "avl",
-      "artifact": "avl.ko",
-      "description": "ZFS AVL tree library – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": []
+      "description": "ZFS AVL tree library",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/avl"
+      },
+      "license": "CDDL-1.0",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
+        "_soft_neon_reason": "ZFS CDDL uses kernel_neon_begin/end (EXPORT_SYMBOL_GPL on Linux >=6.2 aarch64). Fixed in OpenZFS PR#15711 (merged 2.2.x). If the pinned ZFS ref includes that fix AND the board kernel is <6.2, building is safe. Script will probe at configure time."
+      },
+      "build_flags_by_arch": {
+        "aarch64": {
+          "env": {
+            "ZFS_DISABLE_NEON_CHECK": "1"
+          },
+          "configure_extra": ["--enable-linux-builtin"],
+          "_note": "Used only if the configure-time neon probe passes (i.e., kernel_neon_begin is not GPL-only in this kernel build)"
+        }
+      },
+      "notes": "⚠️ RPi/Yellow boards: NEON symbols are GPL-only on Linux ≥6.2 aarch64. Auto-detected at build time; excluded if incompatible."
     },
     {
       "name": "icp",
-      "artifact": "icp.ko",
-      "description": "ZFS ICP (Illumos Crypto Provider) – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": []
+      "description": "ZFS ICP (Illumos Crypto Provider)",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/icp"
+      },
+      "license": "CDDL-1.0",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+      },
+      "build_flags_by_arch": {
+        "aarch64": {
+          "kconfig_overrides": [
+            "# CONFIG_KERNEL_MODE_NEON is guarded — icp will fall back to generic C impl if NEON unavailable"
+          ]
+        }
+      },
+      "notes": "⚠️ RPi/Yellow boards: same NEON/CDDL constraint as avl.ko. Auto-detected."
     },
     {
       "name": "lua",
-      "artifact": "lua.ko",
-      "description": "ZFS Lua scripting engine – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": []
+      "description": "ZFS Lua scripting engine",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/lua"
+      },
+      "license": "CDDL-1.0",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+      },
+      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "nvpair",
-      "artifact": "nvpair.ko",
-      "description": "ZFS name-value pair library – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": []
+      "description": "ZFS name-value pair library",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/nvpair"
+      },
+      "license": "CDDL-1.0",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+      },
+      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "unicode",
-      "artifact": "unicode.ko",
-      "description": "ZFS Unicode support – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": []
+      "description": "ZFS Unicode support",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/unicode"
+      },
+      "license": "CDDL-1.0",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+      },
+      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "zcommon",
-      "artifact": "zcommon.ko",
-      "description": "ZFS common library – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": []
+      "description": "ZFS common library",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/zcommon"
+      },
+      "license": "CDDL-1.0",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+      },
+      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "zstd",
-      "artifact": "zstd.ko",
-      "description": "ZFS Zstandard compression – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": []
+      "description": "ZFS Zstandard compression",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/zstd"
+      },
+      "license": "CDDL-1.0 AND BSD-3-Clause",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+      },
+      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected."
     },
     {
       "name": "zfs",
-      "artifact": "zfs.ko",
-      "description": "ZFS filesystem support – from openzfs/zfs",
-      "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
-      "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
-      "configs": [
-        {
-          "symbol": "CONFIG_ZFS",
-          "value": "m"
-        }
-      ]
+      "description": "ZFS filesystem support",
+      "kconfig": [],
+      "source": {
+        "repo": "https://github.com/openzfs/zfs",
+        "ref": "zfs-2.2-release",
+        "type": "zfs_module",
+        "subdir": "module/zfs"
+      },
+      "license": "CDDL-1.0",
+      "exclude_boards": {
+        "hard": [],
+        "soft_neon": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"]
+      },
+      "notes": "⚠️ RPi/Yellow boards: CDDL/GPL-only symbol constraint. Auto-detected at build time via scripts/probe_gpl_symbols.sh."
     }
-  ]
+  ],
+
+  "boards": {
+    "x86_64": {
+      "arch": "x86_64",
+      "kernel_arch": "x86",
+      "defconfig": "pc_x86_64_efi_defconfig"
+    },
+    "odroid_c4": {
+      "arch": "aarch64",
+      "kernel_arch": "arm64",
+      "defconfig": "odroid_c4_defconfig"
+    },
+    "odroid_n2": {
+      "arch": "aarch64",
+      "kernel_arch": "arm64",
+      "defconfig": "odroid_n2_defconfig"
+    },
+    "rpi3_64": {
+      "arch": "aarch64",
+      "kernel_arch": "arm64",
+      "defconfig": "rpi3_defconfig",
+      "kernel_tree": "rpi",
+      "_note": "Uses Raspberry Pi Foundation kernel tree. kernel_neon_begin/end are EXPORT_SYMBOL_GPL on this tree."
+    },
+    "rpi4_64": {
+      "arch": "aarch64",
+      "kernel_arch": "arm64",
+      "defconfig": "rpi4_defconfig",
+      "kernel_tree": "rpi",
+      "_note": "Uses Raspberry Pi Foundation kernel tree."
+    },
+    "rpi5_64": {
+      "arch": "aarch64",
+      "kernel_arch": "arm64",
+      "defconfig": "rpi5_defconfig",
+      "kernel_tree": "rpi",
+      "_note": "Uses Raspberry Pi Foundation kernel tree."
+    },
+    "yellow": {
+      "arch": "aarch64",
+      "kernel_arch": "arm64",
+      "defconfig": "yellow_defconfig",
+      "kernel_tree": "rpi",
+      "_note": "Home Assistant Yellow board. Uses RPi CM4, same kernel tree constraints."
+    }
+  },
+
+  "zfs_build": {
+    "_doc": "Global ZFS build configuration. Used by scripts/build_zfs.sh.",
+    "repo": "https://github.com/openzfs/zfs",
+    "ref": "zfs-2.2-release",
+    "configure_base": [
+      "--with-config=kernel",
+      "--enable-linux-builtin"
+    ],
+    "configure_aarch64_safe": [
+      "--with-config=kernel",
+      "--enable-linux-builtin",
+      "--without-neon"
+    ],
+    "_configure_aarch64_safe_note": "Used when probe_gpl_symbols.sh detects kernel_neon_begin as EXPORT_SYMBOL_GPL. Falls back to pure C implementations (no NEON AES acceleration) but avoids GPL symbol violations.",
+    "tracepoints_disable_cflags": "-DZFS_NO_TRACEPOINTS",
+    "_tracepoints_note": "Disabling tracepoints avoids bpf_trace_run*/trace_event_* GPL-only symbol deps. Applied for all aarch64 boards in zfs_build.configure_aarch64_safe context.",
+    "modules_order": [
+      "spl",
+      "avl",
+      "nvpair",
+      "unicode",
+      "zcommon",
+      "lua",
+      "icp",
+      "zstd",
+      "zfs"
+    ],
+    "_modules_order_note": "ZFS sub-modules must be loaded in dependency order. avl/nvpair/unicode/zcommon before lua/icp/zstd before zfs."
+  }
 }
