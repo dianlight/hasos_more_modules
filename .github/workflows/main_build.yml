@@ -53,7 +53,7 @@ jobs:
     name: Detect missing releases
     runs-on: ubuntu-22.04
     outputs:
-      matrix:   ${{ steps.build-matrix.outputs.matrix }}
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
       has_work: ${{ steps.build-matrix.outputs.has_work }}
 
     steps:
@@ -125,8 +125,8 @@ jobs:
 
     env:
       HAOS_VERSION: ${{ matrix.version }}
-      BOARD:        ${{ matrix.board }}
-      ARCH:         ${{ matrix.arch }}
+      BOARD: ${{ matrix.board }}
+      ARCH: ${{ matrix.arch }}
 
     steps:
       - name: Checkout
@@ -198,8 +198,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: home-assistant/operating-system
-          ref:        ${{ matrix.version }}
-          path:       haos
+          ref: ${{ matrix.version }}
+          path: haos
           submodules: recursive
           fetch-depth: 1
 
@@ -253,9 +253,9 @@ jobs:
           # over values in .config. Covers any path that .config might miss.
           mkdir -p /tmp/br-ccache
           cat > output/local.mk << LOCALMK
-BR2_DL_DIR := ${BR_DL_DIR}
-BR2_CCACHE_DIR := /tmp/br-ccache
-LOCALMK
+          BR2_DL_DIR := ${BR_DL_DIR}
+          BR2_CCACHE_DIR := /tmp/br-ccache
+          LOCALMK
           echo "local.mk written:"
           cat output/local.mk
 
@@ -473,8 +473,8 @@ LOCALMK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.version }}
-          name:     "HAOS ${{ matrix.version }} kernel modules"
-          files:    release_assets/*
+          name: "HAOS ${{ matrix.version }} kernel modules"
+          files: release_assets/*
           body: |
             Extra kernel modules for **Home Assistant OS ${{ matrix.version }}**.
 
