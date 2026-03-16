@@ -461,22 +461,23 @@ jobs:
           OUT_DIR="output_modules/${VERSION}/${BOARD}"
           mkdir -p "${OUT_DIR}"
 
-          mapfile -t MODULE_NAMES < <(python3 scripts/modules_config.py --board "${BOARD}" module-names)
-          if [[ ${#MODULE_NAMES[@]} -eq 0 ]]; then
+          mapfile -t ARTIFACT_NAMES < <(python3 scripts/modules_config.py --board "${BOARD}" artifact-names)
+          if [[ ${#ARTIFACT_NAMES[@]} -eq 0 ]]; then
             echo "[ERROR] No modules found in config/modules.json"
             exit 1
           fi
 
-          for mod in "${MODULE_NAMES[@]}"; do
+          for artifact in "${ARTIFACT_NAMES[@]}"; do
             KO_PATH=$(find "${LINUX_SRC}" \
-              -type f -name "${mod}.ko" 2>/dev/null | head -1 || true)
+              -type f -name "${artifact}" 2>/dev/null | head -1 || true)
 
             if [[ -n "${KO_PATH}" ]]; then
-              DEST="${OUT_DIR}/${mod}_${VERSION}_${BOARD}.ko"
+              STEM="${artifact%.ko}"
+              DEST="${OUT_DIR}/${STEM}_${VERSION}_${BOARD}.ko"
               cp "${KO_PATH}" "${DEST}"
               echo "[OK] ${DEST}"
             else
-              echo "[WARN] ${mod}.ko not found – it may be built-in or not supported on ${BOARD}."
+              echo "[WARN] ${artifact} not found – it may be built-in or not supported on ${BOARD}."
             fi
           done
 

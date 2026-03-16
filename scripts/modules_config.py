@@ -98,6 +98,14 @@ def module_names(data: dict[str, Any], board: str | None = None) -> list[str]:
     ]
 
 
+def artifact_names(data: dict[str, Any], board: str | None = None) -> list[str]:
+    return [
+        str(module["artifact"])
+        for module in data.get("modules", [])
+        if not _is_excluded(module, board)
+    ]
+
+
 def _exclusion_note(module: dict[str, Any]) -> str:
     """Return a human-readable note about board exclusions, or empty string."""
     boards = module.get("exclude_boards", [])
@@ -195,6 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("module-names", help="Print module names, one per line")
     sub.add_parser("module-names-json", help="Print module names as JSON array")
+    sub.add_parser("artifact-names", help="Print artifact basenames, one per line")
+    sub.add_parser("artifact-names-json", help="Print artifact basenames as JSON array")
     sub.add_parser(
         "config-assignments-json",
         help="Print CONFIG assignments as JSON",
@@ -221,6 +231,14 @@ def main() -> int:
 
     if args.command == "module-names-json":
         print(json.dumps(module_names(data, board)))
+        return 0
+
+    if args.command == "artifact-names":
+        print("\n".join(artifact_names(data, board)))
+        return 0
+
+    if args.command == "artifact-names-json":
+        print(json.dumps(artifact_names(data, board)))
         return 0
 
     if args.command == "config-assignments-json":

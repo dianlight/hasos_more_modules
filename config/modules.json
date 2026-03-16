@@ -65,7 +65,7 @@
     },
     {
       "name": "avl",
-      "artifact": "avl.ko",
+      "artifact": "zavl.ko",
       "description": "ZFS AVL tree library – from openzfs/zfs",
       "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
       "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
@@ -81,7 +81,7 @@
     },
     {
       "name": "lua",
-      "artifact": "lua.ko",
+      "artifact": "zlua.ko",
       "description": "ZFS Lua scripting engine – from openzfs/zfs",
       "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
       "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
@@ -89,7 +89,7 @@
     },
     {
       "name": "nvpair",
-      "artifact": "nvpair.ko",
+      "artifact": "znvpair.ko",
       "description": "ZFS name-value pair library – from openzfs/zfs",
       "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
       "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
@@ -97,7 +97,7 @@
     },
     {
       "name": "unicode",
-      "artifact": "unicode.ko",
+      "artifact": "zunicode.ko",
       "description": "ZFS Unicode support – from openzfs/zfs",
       "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
       "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
@@ -113,7 +113,7 @@
     },
     {
       "name": "zstd",
-      "artifact": "zstd.ko",
+      "artifact": "zzstd.ko",
       "description": "ZFS Zstandard compression – from openzfs/zfs",
       "exclude_boards": ["rpi3_64", "rpi4_64", "rpi5_64", "yellow"],
       "exclude_reason": "ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).",
