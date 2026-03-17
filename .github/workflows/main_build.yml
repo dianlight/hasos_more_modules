@@ -459,27 +459,11 @@ jobs:
           VERSION="${{ matrix.version }}"
           BOARD="${{ matrix.board }}"
           OUT_DIR="output_modules/${VERSION}/${BOARD}"
-          mkdir -p "${OUT_DIR}"
-
-          mapfile -t ARTIFACT_NAMES < <(python3 scripts/modules_config.py --board "${BOARD}" artifact-names)
-          if [[ ${#ARTIFACT_NAMES[@]} -eq 0 ]]; then
-            echo "[ERROR] No modules found in config/modules.json"
-            exit 1
-          fi
-
-          for artifact in "${ARTIFACT_NAMES[@]}"; do
-            KO_PATH=$(find "${LINUX_SRC}" \
-              -type f -name "${artifact}" 2>/dev/null | head -1 || true)
-
-            if [[ -n "${KO_PATH}" ]]; then
-              STEM="${artifact%.ko}"
-              DEST="${OUT_DIR}/${STEM}_${VERSION}_${BOARD}.ko"
-              cp "${KO_PATH}" "${DEST}"
-              echo "[OK] ${DEST}"
-            else
-              echo "[WARN] ${artifact} not found – it may be built-in or not supported on ${BOARD}."
-            fi
-          done
+          python3 scripts/collect_module_artifacts.py \
+            --linux-src "${LINUX_SRC}" \
+            --board "${BOARD}" \
+            --version "${VERSION}" \
+            --output-dir "${OUT_DIR}"
 
       - name: Fail if no modules were produced
         run: |

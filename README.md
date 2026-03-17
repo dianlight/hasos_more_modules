@@ -14,23 +14,19 @@ Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled
 
 Available modules:
 
-The table below is generated from `config/modules.json`.
+The table below is generated from `config/modules.json` and lists only the
+top-level modules requested by this project. If one of these modules depends on
+additional `.ko` files, the workflow discovers them with `modinfo` and ships
+them automatically only when the full dependency chain is available.
 
 <!-- modules-table:start -->
-| Module        | Description                                                                    | Notes                                                                                                                                                                                                                 |
-| :------------ | :----------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `xfs.ko`      | XFS filesystem support                                                         |                                                                                                                                                                                                                       |
-| `nfsd.ko`     | NFS server daemon                                                              |                                                                                                                                                                                                                       |
-| `nfs.ko`      | NFS client support                                                             |                                                                                                                                                                                                                       |
-| `quic.ko`     | QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic |                                                                                                                                                                                                                       |
-| `zavl.ko`     | ZFS AVL tree library – from openzfs/zfs                                        | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
-| `icp.ko`      | ZFS ICP (Illumos Crypto Provider) – from openzfs/zfs                           | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
-| `zlua.ko`     | ZFS Lua scripting engine – from openzfs/zfs                                    | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
-| `znvpair.ko`  | ZFS name-value pair library – from openzfs/zfs                                 | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
-| `zunicode.ko` | ZFS Unicode support – from openzfs/zfs                                         | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
-| `zcommon.ko`  | ZFS common library – from openzfs/zfs                                          | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
-| `zstd.ko`     | ZFS Zstandard compression – from openzfs/zfs                                   | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
-| `zfs.ko`      | ZFS filesystem support – from openzfs/zfs                                      | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| Module    | Description                                                                    | Notes                                                                                                                                                                                                                 |
+| :-------- | :----------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `xfs.ko`  | XFS filesystem support                                                         |                                                                                                                                                                                                                       |
+| `nfsd.ko` | NFS server daemon                                                              |                                                                                                                                                                                                                       |
+| `nfs.ko`  | NFS client support                                                             |                                                                                                                                                                                                                       |
+| `quic.ko` | QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic |                                                                                                                                                                                                                       |
+| `zfs.ko`  | ZFS filesystem support – from openzfs/zfs                                      | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
 <!-- modules-table:end -->
 
 Supported architectures: **x86_64** and **aarch64**.
@@ -91,7 +87,12 @@ The primary use is by [SambaNAS2](https://github.com/dianlight/hassio-addons) ap
 │  3. make linux-modules              │
 │     └─ compiles only .ko modules    │
 │                                     │
-│  4. GitHub Release                  │
+│  4. modinfo dependency scan         │
+│     └─ keeps a requested module     │
+│        only if all its .ko deps     │
+│        can be packaged too          │
+│                                     │
+│  5. GitHub Release                  │
 │     └─ uploads .ko assets named     │
 │        {mod}_{ver}_{arch}.ko        │
 └─────────────────────────────────────┘
@@ -277,8 +278,13 @@ python3 scripts/check_releases.py \
 ### Define new modules and CONFIG_* symbols
 
 To add a new module to the workflow, edit the `config/modules.json` file and
-add the module name, description and the corresponding `CONFIG_*` symbol to
-enable it in the kernel configuration.
+add the top-level module name, description and the corresponding `CONFIG_*`
+symbol to enable it in the kernel configuration.
+
+Do not add dependency-only helper modules that require no config changes.
+Those are resolved from the built `.ko` files with `modinfo` during the
+packaging step and are included automatically only when the full dependency
+closure is present.
 
 ### Test the configuration patch
 
@@ -320,6 +326,7 @@ hasos_more_modules/
 ├── scripts/
 │   ├── check_releases.py       # HAOS missing-release detection
 │   ├── modules_config.py       # Reads config/modules.json for CI/docs
+│   ├── collect_module_artifacts.py # Packages requested modules plus modinfo-resolved dependencies
 │   ├── patch_config.sh         # kernel.config patch (YAML-driven)
 │   └── update_readme_modules.py # Regenerates README module table
 ├── .gitignore

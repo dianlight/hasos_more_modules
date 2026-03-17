@@ -135,9 +135,7 @@ def _excluded_modules_section(data: dict[str, Any]) -> str:
         if not boards:
             continue
         artifact = str(module["artifact"])
-        reason = module.get(
-            "exclude_reason", "Not supported on this board."
-        )
+        reason = module.get("exclude_reason", "Not supported on this board.")
         for board in boards:
             board_map.setdefault(board, []).append((artifact, reason))
 
@@ -168,6 +166,10 @@ def release_body(version: str, data: dict[str, Any]) -> str:
         "Compiled out-of-tree kernel modules for **Home Assistant OS "
         f"{version}**.\n\n"
         "Artifacts are named `{module}_{haos_version}_{board}.ko`.\n\n"
+        "Top-level modules listed below are requested explicitly from "
+        "`config/modules.json`. Any additional `.ko` files required by those "
+        "modules are discovered from the built tree with `modinfo` and are "
+        "attached automatically only when the full dependency set is present.\n\n"
         "### Included modules\n"
         "| Module | Description | Notes |\n"
         "|:--------|:-------------|:------|\n"
