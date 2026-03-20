@@ -406,6 +406,25 @@ jobs:
             --with-config=kernel \
             --enable-linux-builtin
 
+          # In linux-builtin mode, OpenZFS configure skips export checks and
+          # may enable code paths which reference GPL-only symbols
+          # (trace_event_*, bpf_trace_run*, kernel_fpu_* / kernel_neon_*).
+          # Force these probes off so resulting CDDL modules don't fail to
+          # load with "Unknown symbol ... (err -2)".
+          ZFS_CFG_H="${ZFS_SRC}/zfs_config.h"
+          if [[ -f "${ZFS_CFG_H}" ]]; then
+            for sym in \
+              HAVE_DECLARE_EVENT_CLASS \
+              HAVE_KERNEL_FPU \
+              HAVE_KERNEL_FPU_INTERNAL \
+              HAVE_UNDERSCORE_KERNEL_FPU \
+              HAVE_KERNEL_NEON \
+              KERNEL_EXPORTS_X86_FPU
+            do
+              sed -i "s|^#define ${sym} .*|/* #undef ${sym} */|" "${ZFS_CFG_H}" || true
+            done
+          fi
+
           # Copy ZFS sources (module/ + include/) into the kernel source tree
           # under fs/zfs/ and register them in fs/Kconfig and fs/Makefile.
           ./copy-builtin "${LINUX_SRC}"
