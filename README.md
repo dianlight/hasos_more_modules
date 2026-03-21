@@ -14,6 +14,8 @@ Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled
 
 Available modules:
 
+The table below lists the top-level modules requested by this project. Each release also includes all runtime dependencies (other `.ko` files) that are discovered automatically and required by these modules but are not part of the standard HAOS kernel.
+
 The table below is generated from `config/modules.json` and lists only the
 top-level modules requested by this project. If one of these modules depends on
 additional `.ko` files, the workflow discovers them with `modinfo` and ships
@@ -66,6 +68,8 @@ Supported architectures: **x86_64** and **aarch64**.
 
 This project provides **pre-compiled kernel modules** for Home Assistant OS (HAOS) that are not included in the official HAOS releases. The modules are compiled for each HAOS release and made available as assets in the GitHub Releases of this repository.
 
+For each top-level module requested, the build process also automatically discovers and includes all runtime dependencies (other `.ko` files) that are not part of the standard HAOS kernel. These dependencies are resolved via `modinfo` and packaged only when the complete dependency chain is available. This ensures that you download not just the requested module, but also all the kernel modules it depends on that aren't already in HAOS.
+
 The primary use is by [SambaNAS2](https://github.com/dianlight/hassio-addons) app (add-on) to provide support for the XFS filesystem and NFS server/client capabilities on HAOS. However, the modules can be used for any purpose that requires them.
 
 **Warning:** installing custom kernel modules on HAOS is **unsupported** and may lead to system instability or security issues. Use at your own risk.
@@ -88,13 +92,15 @@ The primary use is by [SambaNAS2](https://github.com/dianlight/hassio-addons) ap
 │     └─ compiles only .ko modules    │
 │                                     │
 │  4. modinfo dependency scan         │
-│     └─ keeps a requested module     │
-│        only if all its .ko deps     │
-│        can be packaged too          │
+│     └─ discovers dependencies not   │
+│        included in HAOS release     │
+│        and packages them if all     │
+│        dependencies can be provided │
 │                                     │
 │  5. GitHub Release                  │
 │     └─ uploads .ko assets named     │
 │        {mod}_{ver}_{arch}.ko        │
+│        including all dependencies   │
 └─────────────────────────────────────┘
 ```
 
