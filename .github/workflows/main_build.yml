@@ -416,7 +416,6 @@ jobs:
             for sym in \
               HAVE_DECLARE_EVENT_CLASS \
               HAVE_KERNEL_FPU \
-              HAVE_KERNEL_FPU_INTERNAL \
               HAVE_UNDERSCORE_KERNEL_FPU \
               HAVE_KERNEL_NEON \
               KERNEL_EXPORTS_X86_FPU
