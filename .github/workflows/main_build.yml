@@ -422,6 +422,24 @@ jobs:
             do
               sed -i "s|^#define ${sym} .*|/* #undef ${sym} */|" "${ZFS_CFG_H}" || true
             done
+
+            # x86 SIMD path requires exactly one selector macro:
+            #   KERNEL_EXPORTS_X86_FPU or HAVE_KERNEL_FPU_INTERNAL
+            # Prefer the internal path in linux-builtin mode. If neither is
+            # present after the sanitization above, define HAVE_KERNEL_FPU_INTERNAL.
+            has_exports=0
+            has_internal=0
+            grep -q '^#define KERNEL_EXPORTS_X86_FPU\b' "${ZFS_CFG_H}" && has_exports=1 || true
+            grep -q '^#define HAVE_KERNEL_FPU_INTERNAL\b' "${ZFS_CFG_H}" && has_internal=1 || true
+
+            if [[ "${has_exports}" -eq 1 && "${has_internal}" -eq 1 ]]; then
+              sed -i 's|^#define KERNEL_EXPORTS_X86_FPU .*|/* #undef KERNEL_EXPORTS_X86_FPU */|' "${ZFS_CFG_H}" || true
+              has_exports=0
+            fi
+
+            if [[ "${has_exports}" -eq 0 && "${has_internal}" -eq 0 ]]; then
+              echo '#define HAVE_KERNEL_FPU_INTERNAL 1' >> "${ZFS_CFG_H}"
+            fi
           fi
 
           # Copy ZFS sources (module/ + include/) into the kernel source tree
