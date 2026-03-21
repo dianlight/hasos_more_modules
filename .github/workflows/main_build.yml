@@ -130,6 +130,9 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      # Limit concurrent matrix workers to reduce runner contention and avoid
+      # heavy build jobs starving each other on network/disk bandwidth.
+      # max-parallel: 4
       matrix:
         version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
         board: ${{ fromJson(needs.detect-boards.outputs.boards) }}
@@ -138,7 +141,26 @@ jobs:
       - name: Checkout hasos_more_modules
         uses: actions/checkout@v6
 
+      - name: Precheck whether this variant has anything to build
+        id: precheck
+        run: |
+          set -euo pipefail
+
+          BOARD="${{ matrix.board }}"
+          MODS_JSON=$(python3 scripts/modules_config.py --board "${BOARD}" module-names-json)
+          MOD_COUNT=$(echo "${MODS_JSON}" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
+
+          if [[ "${MOD_COUNT}" -eq 0 ]]; then
+            echo "[INFO] No modules configured for board '${BOARD}'. Skipping build job early."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "[INFO] Modules requested for ${BOARD}: ${MOD_COUNT}"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+
       - name: Checkout home-assistant/operating-system @ ${{ matrix.version }}
+        if: steps.precheck.outputs.should_build == 'true'
         uses: actions/checkout@v6
         with:
           repository: home-assistant/operating-system
@@ -148,6 +170,7 @@ jobs:
           submodules: recursive
 
       - name: Checkout lxin/quic (out-of-tree QUIC kernel module)
+        if: steps.precheck.outputs.should_build == 'true'
         uses: actions/checkout@v6
         with:
           repository: lxin/quic
@@ -157,6 +180,8 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout openzfs/zfs (out-of-tree ZFS kernel module)
+        # Skip checkout for boards that always exclude ZFS (saves ~600 MB clone time).
+        if: steps.precheck.outputs.should_build == 'true' && !contains(fromJson('["rpi3_64","rpi4_64","rpi5_64","yellow"]'), matrix.board)
         uses: actions/checkout@v6
         with:
           repository: openzfs/zfs
@@ -167,6 +192,7 @@ jobs:
 
       # Buildroot needs a set of host packages.
       - name: Install host build dependencies
+        if: steps.precheck.outputs.should_build == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -176,6 +202,7 @@ jobs:
             autoconf automake libtool pkg-config
 
       - name: Locate kernel config for ${{ matrix.board }}
+        if: steps.precheck.outputs.should_build == 'true'
         id: locate-config
         run: |
           DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
@@ -223,6 +250,7 @@ jobs:
           echo "Found kernel config: ${KERNEL_CONFIG}"
 
       - name: Detect architecture from defconfig
+        if: steps.precheck.outputs.should_build == 'true'
         id: arch
         run: |
           DEFCONFIG="operating-system/buildroot-external/configs/${{ matrix.board }}_defconfig"
@@ -241,11 +269,28 @@ jobs:
           fi
 
       - name: Install cross-compilation toolchain
+        if: steps.precheck.outputs.should_build == 'true'
         run: |
           sudo apt-get install -y --no-install-recommends \
             ${{ steps.arch.outputs.arch_pkg }}
 
+      # Cache the Buildroot download directory so the kernel source tarball and
+      # other packages are not re-downloaded on every run.  The cache key is
+      # pinned to the HAOS version because each version targets a specific
+      # kernel release; restore-keys let later jobs reuse the cache even before
+      # the exact entry has been uploaded.
+      - name: Cache Buildroot downloads (br-dl)
+        if: steps.precheck.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: br-dl
+          key: br-dl-${{ matrix.version }}-${{ matrix.board }}
+          restore-keys: |
+            br-dl-${{ matrix.version }}-
+            br-dl-
+
       - name: Configure kernel source via Buildroot
+        if: steps.precheck.outputs.should_build == 'true'
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
           CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
@@ -315,6 +360,7 @@ jobs:
           echo "LINUX_SRC=${GITHUB_WORKSPACE}/operating-system/${LINUX_SRC_REL}" >> "$GITHUB_ENV"
 
       - name: Integrate lxin/quic into kernel source (skip if natively present)
+        if: steps.precheck.outputs.should_build == 'true'
         run: |
           set -euo pipefail
 
@@ -352,6 +398,7 @@ jobs:
           echo "[INFO] QUIC module integrated into kernel source."
 
       - name: Integrate openzfs/zfs into kernel source (skip if natively present)
+        if: steps.precheck.outputs.should_build == 'true'
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
           CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
@@ -449,23 +496,70 @@ jobs:
           echo "[INFO] ZFS module integrated into kernel source."
 
       - name: Patch kernel config and build modules
+        if: steps.precheck.outputs.should_build == 'true'
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
           CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
         run: |
           set -euo pipefail
 
-          # Patch the fully merged kernel config so we only modify the
+          # ── Step 1: Snapshot all CONFIG symbols that are already =m in the
+          # HAOS merged config.  These are modules HAOS already builds; after
+          # our patch they will be promoted to =y so that 'make modules' skips
+          # them and only compiles the modules we are explicitly adding.
+          HAOS_M_SYMS=$(grep -E '^[A-Z0-9_]+=m$' "${LINUX_SRC}/.config" \
+                          | cut -d= -f1 || true)
+          HAOS_M_COUNT=$(echo "${HAOS_M_SYMS}" | grep -c . || true)
+          echo "[INFO] ${HAOS_M_COUNT} CONFIG symbols are =m in the HAOS base kernel."
+
+          # ── Step 2: Patch the fully merged kernel config so we only modify the
           # effective value, avoiding fragment-order overrides (e.g. y -> m).
           echo "[INFO] Patching merged kernel config: ${LINUX_SRC}/.config"
           bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" "${LINUX_SRC}/.config" "${{ matrix.board }}"
 
-          echo "[INFO] Running kernel olddefconfig after patch ..."
+          # ── Step 3: Determine which CONFIG symbols we explicitly set to =m.
+          TARGET_M_SYMS=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            --board "${{ matrix.board }}" config-assignments-json \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(e['symbol'] for e in d if e['value']=='m'))")
+
+          # ── Step 4: Promote pre-existing =m symbols to =y so that
+          # 'make modules' skips them, unless they are one of our explicit
+          # targets (which must remain =m so a .ko is produced).
+          #
+          # Why =y and not =n?  Setting to =y marks the feature as built-in –
+          # the kernel build system recognises it as "available" when resolving
+          # dependencies of our modules, without actually compiling a .ko.
+          PROMOTED=0
+          KEPT=0
+          for sym in ${HAOS_M_SYMS}; do
+            # Check if this symbol is one of our explicit =m targets.
+            if echo " ${TARGET_M_SYMS} " | grep -qF " ${sym} "; then
+              echo "[KEEP] ${sym}=m  (our build target)"
+              KEPT=$((KEPT + 1))
+              continue
+            fi
+            # Only touch it if it is still =m after our patch.
+            if grep -q "^${sym}=m$" "${LINUX_SRC}/.config"; then
+              sed -i "s/^${sym}=m\$/${sym}=y/" "${LINUX_SRC}/.config"
+              PROMOTED=$((PROMOTED + 1))
+            fi
+          done
+          echo "[INFO] Promoted ${PROMOTED} HAOS-native =m modules to =y (already shipped by HAOS, skipping rebuild)."
+          echo "[INFO] Kept     ${KEPT} symbols as =m (our build targets)."
+
+          echo "[INFO] Running kernel olddefconfig after promotion ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             olddefconfig \
             2>&1 | tail -30
+
+          # Confirm our targets survived olddefconfig.
+          echo "[INFO] Target module config values after olddefconfig:"
+          for sym in ${TARGET_M_SYMS}; do
+            val=$(grep -E "^${sym}=" "${LINUX_SRC}/.config" | head -n1 || echo "${sym}=MISSING")
+            echo "  ${val}"
+          done
 
           # Prefer Buildroot's internal cross toolchain if present.
           OS_DIR="${GITHUB_WORKSPACE}/operating-system"
@@ -480,8 +574,8 @@ jobs:
           echo "[INFO] Module build CROSS_COMPILE=${MODULE_CROSS_COMPILE}"
 
           # Build only the kernel modules using the kernel's own Makefile.
-          # Buildroot does not expose a 'linux-modules' phony target, so we
-          # invoke the kernel build system directly.
+          # Because we promoted all pre-existing =m entries to =y, 'make modules'
+          # now only compiles the small set of modules we explicitly added.
           echo "[INFO] Building kernel modules in ${LINUX_SRC} ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
@@ -491,6 +585,7 @@ jobs:
             2>&1 | tail -100
 
       - name: Extract and rename .ko files
+        if: steps.precheck.outputs.should_build == 'true'
         run: |
           VERSION="${{ matrix.version }}"
           BOARD="${{ matrix.board }}"
@@ -502,6 +597,7 @@ jobs:
             --output-dir "${OUT_DIR}"
 
       - name: Fail if no modules were produced
+        if: steps.precheck.outputs.should_build == 'true'
         run: |
           VERSION="${{ matrix.version }}"
           BOARD="${{ matrix.board }}"
@@ -509,6 +605,26 @@ jobs:
 
           COUNT=$(find "${OUT_DIR}" -maxdepth 1 -type f -name '*.ko' | wc -l)
           if [[ "${COUNT}" -eq 0 ]]; then
+            # Check if ALL our target modules were already =m in the HAOS kernel
+            # (i.e., promoted to =y by the build step and therefore not compiled).
+            TARGET_M=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+              --board "${BOARD}" config-assignments-json \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(e['symbol'] for e in d if e['value']=='m'))")
+            ALL_NATIVE=true
+            for sym in ${TARGET_M}; do
+              if grep -q "^${sym}=y$" "${LINUX_SRC}/.config" 2>/dev/null; then
+                echo "[INFO] ${sym} was already native in HAOS kernel (=y after promotion)."
+              else
+                ALL_NATIVE=false
+              fi
+            done
+
+            if [[ "${ALL_NATIVE}" == "true" ]]; then
+              echo "[INFO] All target modules for ${VERSION}/${BOARD} are already"
+              echo "[INFO] built into the official HAOS kernel.  Nothing new to ship."
+              exit 0
+            fi
+
             echo "[ERROR] No .ko modules were produced for ${VERSION}/${BOARD}."
             exit 1
           fi
@@ -516,6 +632,7 @@ jobs:
           echo "[INFO] Produced ${COUNT} module(s) for ${VERSION}/${BOARD}."
 
       - name: Upload modules as workflow artifacts
+        if: steps.precheck.outputs.should_build == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: modules-${{ matrix.version }}-${{ matrix.board }}
@@ -612,6 +729,44 @@ jobs:
           fi
 
           echo "[INFO] Latest stable release: ${LATEST_TAG:-none}, Current: ${VERSION}"
+
+      - name: Remove existing release assets (if release already exists)
+        if: steps.check-artifacts.outputs.has_artifacts == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ matrix.version }}"
+
+          RELEASE_JSON=$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${THIS_REPO}/releases/tags/${VERSION}" \
+            || true)
+
+          if [[ -z "${RELEASE_JSON}" ]] || [[ "$(echo "${RELEASE_JSON}" | jq -r '.id // empty')" == "" ]]; then
+            echo "[INFO] No existing release for tag ${VERSION}; nothing to remove."
+            exit 0
+          fi
+
+          ASSET_IDS=$(echo "${RELEASE_JSON}" | jq -r '.assets[]?.id')
+          if [[ -z "${ASSET_IDS}" ]]; then
+            echo "[INFO] Release ${VERSION} exists but has no assets to delete."
+            exit 0
+          fi
+
+          while IFS= read -r asset_id; do
+            [[ -z "${asset_id}" ]] && continue
+            echo "[INFO] Deleting existing release asset id=${asset_id}"
+            curl -fsSL -X DELETE \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${THIS_REPO}/releases/assets/${asset_id}" \
+              > /dev/null
+          done <<< "${ASSET_IDS}"
 
       - name: Create / update GitHub Release
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
