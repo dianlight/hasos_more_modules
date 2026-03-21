@@ -132,7 +132,7 @@ jobs:
       fail-fast: false
       # Limit concurrent matrix workers to reduce runner contention and avoid
       # heavy build jobs starving each other on network/disk bandwidth.
-      max-parallel: 4
+      # max-parallel: 4
       matrix:
         version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
         board: ${{ fromJson(needs.detect-boards.outputs.boards) }}
