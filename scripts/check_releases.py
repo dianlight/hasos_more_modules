@@ -73,7 +73,7 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
 
     Filtering rules:
     - Exclude draft releases.
-    - Exclude releases older than 2 years.
+    - Exclude releases older than 1 years.
     - Exclude pre-releases that are not newer (by publish date) than the
       latest stable (non-pre-release) release.
     """
@@ -81,7 +81,7 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
     releases: list[dict] = _get(url, token)
 
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=365 * 2)
+    cutoff = now - timedelta(days=365 * 1)
 
     # Determine latest stable release timestamp for prerelease filtering.
     latest_stable_published: datetime | None = None
