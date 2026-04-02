@@ -81,8 +81,7 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
     releases: list[dict] = _get(url, token)
 
     now = datetime.now(timezone.utc)
-    #cutoff = now - timedelta(days=365 * 1)
-    cutoff = now - timedelta(days=346) # FIXME: TMP to >15.2 Return to 1y after 14/4 
+    cutoff = now - timedelta(days=365 * 1)
 
     # Determine latest stable release timestamp for prerelease filtering.
     latest_stable_published: datetime | None = None
