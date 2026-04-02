@@ -74,6 +74,7 @@ jobs:
       contents: read
     outputs:
       versions: ${{ steps.detect.outputs.versions }}
+      has_versions: ${{ steps.detect.outputs.has_versions }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -104,7 +105,8 @@ jobs:
 
           if [[ -z "${VERSIONS}" ]]; then
             echo "No new versions to build."
-            echo "versions=[]" >> "$GITHUB_OUTPUT"
+            echo "versions=[]"        >> "$GITHUB_OUTPUT"
+            echo "has_versions=false" >> "$GITHUB_OUTPUT"
           else
             # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS).
             MAX_VERSIONS=${MAX_VERSIONS:-5}
@@ -114,7 +116,8 @@ jobs:
               | head -n "${MAX_VERSIONS}" \
               | jq -R . \
               | jq -sc .)
-            echo "versions=${JSON}" >> "$GITHUB_OUTPUT"
+            echo "versions=${JSON}"      >> "$GITHUB_OUTPUT"
+            echo "has_versions=true"     >> "$GITHUB_OUTPUT"
             echo "Versions to build: ${JSON}"
           fi
 
@@ -124,7 +127,7 @@ jobs:
   build:
     name: Build ${{ matrix.version }} / ${{ matrix.board }}
     needs: [detect-boards, detect-versions]
-    if: needs.detect-versions.outputs.versions != '[]'
+    if: needs.detect-versions.outputs.has_versions == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -645,7 +648,13 @@ jobs:
   release:
     name: Create release ${{ matrix.version }}
     needs: [detect-versions, build]
-    if: needs.detect-versions.outputs.versions != '[]'
+    # always() forza la valutazione della condizione anche quando build è stato
+    # saltato (nessuna versione da compilare), evitando che GitHub marchi il job
+    # in errore per dipendenza skippata.  Se invece build è fallito, lo step
+    # "Abort if build failed" qui sotto propaga l'errore esplicitamente.
+    if: >-
+      always() &&
+      needs.detect-versions.outputs.has_versions == 'true'
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -654,6 +663,12 @@ jobs:
       contents: write
 
     steps:
+      - name: Abort if build failed
+        if: needs.build.result == 'failure'
+        run: |
+          echo "Build job failed – aborting release."
+          exit 1
+
       - name: Checkout hasos_more_modules
         uses: actions/checkout@v6
 
