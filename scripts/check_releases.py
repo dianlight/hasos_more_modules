@@ -31,7 +31,6 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 GITHUB_API = "https://api.github.com"
@@ -135,10 +134,7 @@ def fetch_modules_json_last_modified(
     Return the date of the last commit that touched config/modules.json
     in *this_repo*, or None if it cannot be determined.
     """
-    url = (
-        f"{GITHUB_API}/repos/{this_repo}/commits"
-        f"?path={MODULES_JSON_PATH}&per_page=1"
-    )
+    url = f"{GITHUB_API}/repos/{this_repo}/commits?path={MODULES_JSON_PATH}&per_page=1"
     commits: list[dict] = _get(url, token)
     if not commits:
         return None
@@ -184,9 +180,7 @@ def fetch_compiled_versions(
             if not updated_at:
                 continue
             try:
-                updated_dt = datetime.fromisoformat(
-                    updated_at.replace("Z", "+00:00")
-                )
+                updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
             except ValueError:
                 continue
             if updated_dt <= modules_json_last_modified:
@@ -249,9 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         f"from {args.this_repo} ...",
         file=sys.stderr,
     )
-    modules_json_mtime = fetch_modules_json_last_modified(
-        args.this_repo, args.token
-    )
+    modules_json_mtime = fetch_modules_json_last_modified(args.this_repo, args.token)
     if modules_json_mtime:
         print(
             f"[INFO] {MODULES_JSON_PATH} last modified: {modules_json_mtime.isoformat()}",
@@ -268,9 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         f"[INFO] Fetching compiled releases from {args.this_repo} ...",
         file=sys.stderr,
     )
-    compiled = fetch_compiled_versions(
-        args.this_repo, args.token, modules_json_mtime
-    )
+    compiled = fetch_compiled_versions(args.this_repo, args.token, modules_json_mtime)
 
     new_tags = [t for t in haos_tags if t not in compiled]
 

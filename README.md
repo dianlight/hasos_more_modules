@@ -1,13 +1,13 @@
 # hasos_more_modules
 
 > **Note:** this project is community-maintained and is not affiliated with Nabu Casa / official Home Assistant.
-> 
+>
 > **Warning:** installing custom kernel modules on HAOS is **unsupported** and may lead to system instability or security issues. Use at your own risk.
-> 
+>
 > **Alert:** the modules provided by this project are compiled with the same configuration as the official HAOS releases, but they are **not** signed with the HAOS private key. This means that they can be loaded on HAOS, but they will not be loaded automatically at boot and may require manual intervention to load.
-> 
+>
 > **Disclaimer:** the modules provided by this project are intended for advanced users who understand the risks and implications of installing custom kernel modules on HAOS. The maintainers of this project are not responsible for any issues that may arise from using these modules.
-> 
+>
 > **Very Big Alert:** the project is created and maintained with a heavy use of AI tools (GitHub Copilot, ChatGPT, etc.) to automate the generation of code and documentation. While this allows for rapid development and updates, it may also introduce errors or inconsistencies. Users are encouraged to review the code and documentation carefully before use.
 
 Extra kernel modules for **Home Assistant OS (HAOS)** – automatically compiled for every new release.
@@ -28,7 +28,7 @@ them automatically only when the full dependency chain is available.
 | `nfsd.ko` | NFS server daemon                                                              |                                                                                                                                                                                                                       |
 | `nfs.ko`  | NFS client support                                                             |                                                                                                                                                                                                                       |
 | `quic.ko` | QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic |                                                                                                                                                                                                                       |
-| `zfs.ko`  | ZFS filesystem support – from openzfs/zfs                                      | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*). |
+| `zfs.ko`  | ZFS filesystem support – from openzfs/zfs                                      | ⚠️ Not available on `rpi3_64`, `rpi4_64`, `rpi5_64`, `yellow`: ZFS (CDDL) is license-incompatible with GPL-only kernel symbols exposed by Raspberry Pi kernels (kernel_neon_begin/end, bpf_trace_run*, trace_event_*).|
 <!-- modules-table:end -->
 
 Supported architectures: **x86_64** and **aarch64**.
@@ -254,9 +254,9 @@ ERROR: could not insert module xfs.ko: Invalid module format
 
 | Situation                                                       | Result  |
 | :-------------------------------------------------------------- | :------ |
-| Module compiled for HAOS 13.2, running on HAOS 13.2             | ✅ Works |
-| Module compiled for HAOS 13.2, running on HAOS 13.1             | ❌ Fails |
-| Module compiled for HAOS 13.2, running after an upgrade to 13.3 | ❌ Fails |
+| Module compiled for HAOS 13.2, running on HAOS 13.2             | ✅ Works|
+| Module compiled for HAOS 13.2, running on HAOS 13.1             | ❌ Fails|
+| Module compiled for HAOS 13.2, running after an upgrade to 13.3 | ❌ Fails|
 
 **Solution:** always download the module that matches **exactly** the installed
 HAOS version. After every HAOS update you must replace the modules with the
