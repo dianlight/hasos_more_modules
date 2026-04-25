@@ -1,3 +1,9 @@
+
+[![Build HAOS Kernel Modules](https://github.com/dianlight/hasos_more_modules/actions/workflows/main_build.yml/badge.svg)](https://github.com/dianlight/hasos_more_modules/actions/workflows/main_build.yml)
+
+[![renovate](https://img.shields.io/badge/maintaied%20with-renovate-blue?logo=renovatebot)](https://app.renovatebot.com/dashboard)
+
+
 # hasos_more_modules
 
 > **Note:** this project is community-maintained and is not affiliated with Nabu Casa / official Home Assistant.
