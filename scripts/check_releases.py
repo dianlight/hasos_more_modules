@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             "[INFO] All HAOS releases are already compiled. Nothing to do.",
             file=sys.stderr,
         )
-        return 1
+        return 0
 
     print(f"[INFO] {len(new_tags)} new version(s) to compile:", file=sys.stderr)
     for tag in new_tags:
