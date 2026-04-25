@@ -785,7 +785,7 @@ jobs:
 
       - name: Create / update GitHub Release
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ matrix.version }}
           name: "HAOS ${{ matrix.version }} kernel modules"
