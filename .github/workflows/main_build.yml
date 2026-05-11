@@ -189,7 +189,7 @@ jobs:
         with:
           repository: openzfs/zfs
           # renovate: datasource=github-releases packageName=openzfs/zfs
-          ref: zfs-2.2.9
+          ref: zfs-2.3.6
           path: openzfs-zfs
           fetch-depth: 1
 
