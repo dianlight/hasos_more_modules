@@ -151,87 +151,88 @@ def module_rows(data: dict[str, Any]) -> list[str]:
     return rows
 
 
-def _excluded_modules_section(data: dict[str, Any]) -> str:
-    """Return a markdown section listing modules excluded per board, or ''."""
-    # Build mapping: board -> list of (artifact, reason)
-    board_map: dict[str, list[tuple[str, str]]] = {}
-    for module in data.get("modules", []):
-        boards = module.get("exclude_boards", [])
-        if not boards:
-            continue
-        artifact = str(module["artifact"])
-        reason = module.get("exclude_reason", "Not supported on this board.")
-        for board in boards:
-            board_map.setdefault(board, []).append((artifact, reason))
-
-    if not board_map:
-        return ""
-
-    lines = ["### Board exclusions", ""]
-    for board in sorted(board_map):
-        lines.append(
-            f"**`{board}`** — the following modules are **not** compiled for this board:"
-        )
-        lines.append("")
-        # Collect unique reasons for this board
-        seen_reasons: dict[str, list[str]] = {}
-        for artifact, reason in board_map[board]:
-            seen_reasons.setdefault(reason, []).append(f"`{artifact}`")
-        for reason, artifacts in seen_reasons.items():
-            lines.append(f"- {', '.join(artifacts)}: {reason}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def _failed_modules_section(
-    failed_modules: dict[str, list[str]] | None,
+def _build_matrix_table(
+    data: dict[str, Any],
+    boards: list[str],
+    failed_modules: dict[str, list[str]] | None = None,
 ) -> str:
-    """Return a markdown section listing modules that failed to build."""
-    if not failed_modules:
-        return ""
-    lines = ["### Build failures", ""]
-    lines.append(
-        "The following modules **failed to build** for one or more boards "
-        "and are not included in this release:"
-    )
-    lines.append("")
-    lines.append("| Module | Failed boards |")
-    lines.append("|:-------|:--------------|")
-    for name, boards in sorted(failed_modules.items()):
-        boards_fmt = ", ".join(f"`{b}`" for b in sorted(boards))
-        lines.append(f"| `{name}` | {boards_fmt} |")
-    lines.append("")
-    return "\n".join(lines)
+    """Build a module×board matrix table with a numbered legend."""
+    if failed_modules is None:
+        failed_modules = {}
+
+    legend_entries: list[tuple[str, str]]  = []
+    reason_index: dict[str, int] = {}
+
+    def _get_exclude_ref(reason: str) -> int:
+        if reason not in reason_index:
+            reason_index[reason] = len(legend_entries) + 1
+            legend_entries.append((":white_circle:", reason))
+        return reason_index[reason]
+
+    def _get_failure_ref(module_name: str) -> int:
+        key = f"__fail__{module_name}"
+        if key not in reason_index:
+            reason_index[key] = len(legend_entries) + 1
+            legend_entries.append((":anger:", f"`{module_name}` build error"))
+        return reason_index[key]
+
+    modules = data.get("modules", [])
+
+    header = "| Module | " + " | ".join(f"`{b}`" for b in boards) + " |"
+    separator = "|:-------|" + "|".join(":---:" for _ in boards) + "|"
+
+    rows: list[str] = []
+    for module in modules:
+        name = str(module["name"])
+        artifact = str(module["artifact"])
+        excluded_boards = module.get("exclude_boards", [])
+        exclude_reason = module.get(
+            "exclude_reason", "Not supported on this board."
+        )
+        failed_boards = failed_modules.get(name, [])
+
+        cells: list[str] = []
+        for board in boards:
+            if board in failed_boards:
+                ref = _get_failure_ref(name)
+                cells.append(f":anger: <sup>{ref}</sup>")
+            elif board in excluded_boards:
+                ref = _get_exclude_ref(exclude_reason)
+                cells.append(f":white_circle: <sup>{ref}</sup>")
+            else:
+                cells.append(":white_check_mark:")
+        rows.append(f"| `{artifact}` | " + " | ".join(cells) + " |")
+
+    legend_lines = [
+        "",
+        "| | |",
+        "|:---|:---|",
+        "| :white_check_mark: | Module Available |",
+    ]
+    for idx, (icon, reason) in enumerate(legend_entries, start=1):
+        legend_lines.append(f"| {icon} <sup>{idx}</sup> | {reason} |")
+
+    return "\n".join([header, separator, *rows, *legend_lines, ""])
 
 
 def release_body(
     version: str,
     data: dict[str, Any],
+    boards: list[str],
     failed_modules: dict[str, list[str]] | None = None,
 ) -> str:
-    rows = "\n".join(module_rows(data))
-    excluded_section = _excluded_modules_section(data)
-    failed_section = _failed_modules_section(failed_modules)
+    matrix = _build_matrix_table(data, boards, failed_modules)
     body = (
         "Compiled out-of-tree kernel modules for **Home Assistant OS "
         f"{version}**.\n\n"
-        "Artifacts are named `{module}_{haos_version}_{board}.ko`.\n\n"
+        "Artifacts are named `{{module}}_{{haos_version}}_{{board}}.ko`.\n\n"
         "Top-level modules listed below are requested explicitly from "
         "`config/modules.json`. Any additional `.ko` files required by those "
         "modules are discovered from the built tree with `modinfo` and are "
         "attached automatically only when the full dependency set is present.\n\n"
-        "### Included modules\n"
-        "| Module | Description | Notes |\n"
-        "|:--------|:-------------|:------|\n"
-        f"{rows}\n\n"
-    )
-    if excluded_section:
-        body += excluded_section + "\n"
-    if failed_section:
-        body += failed_section + "\n"
-    body += (
-        "### Supported boards\n"
+        "### Included modules\n\n"
+        f"{matrix}\n"
+        "### Supported boards\n\n"
         "One set of `.ko` files is provided per board listed below.\n"
         "Each file is compiled against the **exact** kernel shipped with\n"
         f"HAOS {version} for that board.  Loading a module on a\n"
@@ -280,6 +281,11 @@ def build_parser() -> argparse.ArgumentParser:
     body = sub.add_parser("release-body", help="Render release body markdown")
     body.add_argument("--version", required=True, help="HAOS version")
     body.add_argument("--output", help="Write output to file instead of stdout")
+    body.add_argument(
+        "--boards-json",
+        required=True,
+        help='JSON array of board names, e.g. \'["generic_x86_64","rpi4_64"]\'',
+    )
     body.add_argument(
         "--failed-modules-json",
         default=None,
@@ -340,10 +346,13 @@ def main() -> int:
         return 0
 
     if args.command == "release-body":
+        boards_list: list[str] = json.loads(args.boards_json)
         failed: dict[str, list[str]] | None = None
         if args.failed_modules_json:
             failed = json.loads(args.failed_modules_json)
-        body = release_body(args.version, data, failed_modules=failed)
+        body = release_body(
+            args.version, data, boards=boards_list, failed_modules=failed
+        )
         if args.output:
             Path(args.output).write_text(body, encoding="utf-8")
         else:

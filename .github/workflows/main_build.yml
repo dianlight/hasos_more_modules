@@ -721,7 +721,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Create release ${{ matrix.version }}
-    needs: [detect-versions, build]
+    needs: [detect-boards, detect-versions, build]
     # always() forza la valutazione della condizione anche quando build è stato
     # saltato (nessuna versione da compilare), evitando che GitHub marchi il job
     # in errore per dipendenza skippata.  Se invece build è fallito, lo step
@@ -814,18 +814,21 @@ jobs:
       - name: Render release body from config/modules.json
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
         run: |
+          BOARDS_JSON='${{ needs.detect-boards.outputs.boards }}'
           FAILED_JSON='${{ steps.aggregate-manifests.outputs.failed_json }}'
           if [[ -n "${FAILED_JSON}" && "${FAILED_JSON}" != "{}" ]]; then
             python3 scripts/modules_config.py \
               release-body \
               --version "${{ matrix.version }}" \
               --output release-body.md \
+              --boards-json "${BOARDS_JSON}" \
               --failed-modules-json "${FAILED_JSON}"
           else
             python3 scripts/modules_config.py \
               release-body \
               --version "${{ matrix.version }}" \
-              --output release-body.md
+              --output release-body.md \
+              --boards-json "${BOARDS_JSON}"
           fi
 
       - name: Determine make_latest flag
