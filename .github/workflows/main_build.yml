@@ -472,6 +472,15 @@ jobs:
           cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
           sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
 
+          # IP_TUNNEL_RECURSION_LIMIT was backported to stable 6.12.78+ as a
+          # routing-loop fix, but WITHOUT the companion proto.recvmsg addr_len
+          # removal (a mainline >= 6.14 change). lxin/quic uses the macro as a
+          # proxy for that ABI change, so it compiles the wrong 4-arg recvmsg
+          # on 6.12.85, causing a type mismatch. Replace with an explicit check.
+          sed -i 's/#ifdef IP_TUNNEL_RECURSION_LIMIT/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)/g' \
+            "${LINUX_SRC}/net/quic/socket.c"
+          echo "[INFO] Patched net/quic/socket.c: IP_TUNNEL_RECURSION_LIMIT → KERNEL_VERSION(6,14,0)"
+
           grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
             echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
           grep -qF 'source "net/quic/Kconfig"' "${LINUX_SRC}/net/Kconfig" || \
