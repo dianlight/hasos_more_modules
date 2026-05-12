@@ -56,6 +56,7 @@
       "name": "quic",
       "artifact": "quic.ko",
       "description": "QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic",
+      "requires_patch": true,
       "configs": [
         {
           "symbol": "CONFIG_IP_QUIC",
@@ -67,6 +68,7 @@
       "name": "zfs",
       "artifact": "zfs.ko",
       "description": "ZFS filesystem support – from openzfs/zfs",
+      "requires_patch": true,
       "exclude_boards": [
         "rpi3_64",
         "rpi4_64",

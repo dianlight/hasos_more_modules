@@ -40,6 +40,9 @@ def load_config(path: Path) -> dict[str, Any]:
         exclude_reason = module.get("exclude_reason")
         if exclude_reason is not None and not isinstance(exclude_reason, str):
             raise ValueError(f"modules[{idx}] 'exclude_reason' must be a string")
+        requires_patch = module.get("requires_patch")
+        if requires_patch is not None and not isinstance(requires_patch, bool):
+            raise ValueError(f"modules[{idx}] 'requires_patch' must be a boolean")
 
     return data
 
@@ -52,7 +55,9 @@ def _is_excluded(module: dict[str, Any], board: str | None) -> bool:
 
 
 def normalize_assignments(
-    data: dict[str, Any], board: str | None = None
+    data: dict[str, Any],
+    board: str | None = None,
+    only_modules: list[str] | None = None,
 ) -> list[dict[str, str]]:
     assignments: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -84,6 +89,8 @@ def normalize_assignments(
     for module in modules:
         if _is_excluded(module, board):
             continue
+        if only_modules is not None and str(module["name"]) not in only_modules:
+            continue
         for entry in module.get("configs", []):
             add_entry(entry)
 
@@ -95,6 +102,24 @@ def module_names(data: dict[str, Any], board: str | None = None) -> list[str]:
         str(module["name"])
         for module in data.get("modules", [])
         if not _is_excluded(module, board)
+    ]
+
+
+def base_module_names(data: dict[str, Any], board: str | None = None) -> list[str]:
+    """Return module names that do NOT require kernel source patching."""
+    return [
+        str(m["name"])
+        for m in data.get("modules", [])
+        if not _is_excluded(m, board) and not m.get("requires_patch", False)
+    ]
+
+
+def patched_module_names(data: dict[str, Any], board: str | None = None) -> list[str]:
+    """Return module names that require kernel source patching."""
+    return [
+        str(m["name"])
+        for m in data.get("modules", [])
+        if not _is_excluded(m, board) and m.get("requires_patch", False)
     ]
 
 
@@ -159,9 +184,35 @@ def _excluded_modules_section(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def release_body(version: str, data: dict[str, Any]) -> str:
+def _failed_modules_section(
+    failed_modules: dict[str, list[str]] | None,
+) -> str:
+    """Return a markdown section listing modules that failed to build."""
+    if not failed_modules:
+        return ""
+    lines = ["### Build failures", ""]
+    lines.append(
+        "The following modules **failed to build** for one or more boards "
+        "and are not included in this release:"
+    )
+    lines.append("")
+    lines.append("| Module | Failed boards |")
+    lines.append("|:-------|:--------------|")
+    for name, boards in sorted(failed_modules.items()):
+        boards_fmt = ", ".join(f"`{b}`" for b in sorted(boards))
+        lines.append(f"| `{name}` | {boards_fmt} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def release_body(
+    version: str,
+    data: dict[str, Any],
+    failed_modules: dict[str, list[str]] | None = None,
+) -> str:
     rows = "\n".join(module_rows(data))
     excluded_section = _excluded_modules_section(data)
+    failed_section = _failed_modules_section(failed_modules)
     body = (
         "Compiled out-of-tree kernel modules for **Home Assistant OS "
         f"{version}**.\n\n"
@@ -177,6 +228,8 @@ def release_body(version: str, data: dict[str, Any]) -> str:
     )
     if excluded_section:
         body += excluded_section + "\n"
+    if failed_section:
+        body += failed_section + "\n"
     body += (
         "### Supported boards\n"
         "One set of `.ko` files is provided per board listed below.\n"
@@ -205,17 +258,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("module-names", help="Print module names, one per line")
     sub.add_parser("module-names-json", help="Print module names as JSON array")
+    sub.add_parser("base-module-names", help="Print base (non-patched) module names, one per line")
+    sub.add_parser("base-module-names-json", help="Print base module names as JSON array")
+    sub.add_parser("patched-module-names", help="Print patched module names, one per line")
+    sub.add_parser("patched-module-names-json", help="Print patched module names as JSON array")
     sub.add_parser("artifact-names", help="Print artifact basenames, one per line")
     sub.add_parser("artifact-names-json", help="Print artifact basenames as JSON array")
-    sub.add_parser(
+
+    assignments = sub.add_parser(
         "config-assignments-json",
         help="Print CONFIG assignments as JSON",
     )
+    assignments.add_argument(
+        "--only-modules",
+        default=None,
+        help="Comma-separated list of module names to include (default: all)",
+    )
+
     sub.add_parser("module-table-rows", help="Print markdown rows for module table")
 
     body = sub.add_parser("release-body", help="Render release body markdown")
     body.add_argument("--version", required=True, help="HAOS version")
     body.add_argument("--output", help="Write output to file instead of stdout")
+    body.add_argument(
+        "--failed-modules-json",
+        default=None,
+        help='JSON object mapping module names to lists of failed boards, e.g. \'{"quic":["generic_x86_64"]}\'',
+    )
 
     return parser
 
@@ -235,6 +304,22 @@ def main() -> int:
         print(json.dumps(module_names(data, board)))
         return 0
 
+    if args.command == "base-module-names":
+        print("\n".join(base_module_names(data, board)))
+        return 0
+
+    if args.command == "base-module-names-json":
+        print(json.dumps(base_module_names(data, board)))
+        return 0
+
+    if args.command == "patched-module-names":
+        print("\n".join(patched_module_names(data, board)))
+        return 0
+
+    if args.command == "patched-module-names-json":
+        print(json.dumps(patched_module_names(data, board)))
+        return 0
+
     if args.command == "artifact-names":
         print("\n".join(artifact_names(data, board)))
         return 0
@@ -244,7 +329,10 @@ def main() -> int:
         return 0
 
     if args.command == "config-assignments-json":
-        print(json.dumps(normalize_assignments(data, board)))
+        only: list[str] | None = None
+        if args.only_modules:
+            only = [m.strip() for m in args.only_modules.split(",") if m.strip()]
+        print(json.dumps(normalize_assignments(data, board, only_modules=only)))
         return 0
 
     if args.command == "module-table-rows":
@@ -252,7 +340,10 @@ def main() -> int:
         return 0
 
     if args.command == "release-body":
-        body = release_body(args.version, data)
+        failed: dict[str, list[str]] | None = None
+        if args.failed_modules_json:
+            failed = json.loads(args.failed_modules_json)
+        body = release_body(args.version, data, failed_modules=failed)
         if args.output:
             Path(args.output).write_text(body, encoding="utf-8")
         else:

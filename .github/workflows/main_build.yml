@@ -362,45 +362,10 @@ jobs:
           # Export the absolute path so subsequent steps can reference it via $LINUX_SRC.
           echo "LINUX_SRC=${GITHUB_WORKSPACE}/operating-system/${LINUX_SRC_REL}" >> "$GITHUB_ENV"
 
-      - name: Integrate lxin/quic into kernel source (skip if natively present)
-        if: steps.precheck.outputs.should_build == 'true'
-        run: |
-          set -euo pipefail
-
-          # If the kernel already ships net/quic natively (future upstream
-          # integration), skip the out-of-tree injection entirely.
-          if [[ -f "${LINUX_SRC}/net/quic/Kconfig" ]]; then
-            echo "[INFO] net/quic/Kconfig already present – QUIC is native in this kernel. Skipping integration."
-            exit 0
-          fi
-
-          echo "[INFO] Integrating QUIC out-of-tree module from lxin/quic ..."
-          QUIC_MODULES_SRC="${GITHUB_WORKSPACE}/lxin-quic/modules"
-
-          # Merge the QUIC UAPI headers into the kernel include tree.
-          # The lxin/quic headers live under include/uapi/linux/quic.h, a new
-          # file not present in the upstream kernel, so there are no conflicts
-          # with existing kernel headers.
-          cp -r "${QUIC_MODULES_SRC}/include/." "${LINUX_SRC}/include/"
-
-          # Copy the QUIC kernel module sources into net/quic/.
-          cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
-
-          # The out-of-tree Makefile adds -I$(ROOTDIR)/include which is only
-          # meaningful in a stand-alone build.  Remove it so the in-tree build
-          # uses the standard kernel include path (where we just placed the headers).
-          sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
-
-          # Register the QUIC module in the kernel build system.
-          # Use exact pattern matching to avoid false positives from comments.
-          grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
-            echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
-          grep -qF 'source "net/quic/Kconfig"' "${LINUX_SRC}/net/Kconfig" || \
-            echo 'source "net/quic/Kconfig"' >> "${LINUX_SRC}/net/Kconfig"
-
-          echo "[INFO] QUIC module integrated into kernel source."
-
-      - name: Integrate openzfs/zfs into kernel source (skip if natively present)
+      # ─────────────────────────────────────────────────────────────────────
+      # Phase 1: Build base modules (no kernel source patching required)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build base modules (xfs, nfsd, nfs)
         if: steps.precheck.outputs.should_build == 'true'
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
@@ -408,29 +373,165 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Check whether ZFS is excluded for this board.  When excluded, skip
-          # both the source integration and the make prepare step so we don't
-          # waste time and the subsequent config patch will not set CONFIG_ZFS=m.
-          BOARD="${{ matrix.board }}"
-          ZFS_EXCLUDED=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
-            --board "${BOARD}" module-names-json \
-            | python3 -c "import sys,json; names=json.load(sys.stdin); print('false' if 'zfs' in names else 'true')")
-          if [[ "${ZFS_EXCLUDED}" == "true" ]]; then
-            echo "[INFO] ZFS is excluded for board '${BOARD}' – skipping integration."
+          # Snapshot all CONFIG symbols that are already =m in the HAOS merged
+          # config.  These will be promoted to =y so 'make modules' only builds
+          # our explicitly added modules.
+          HAOS_M_SYMS=$(grep -E '^[A-Z0-9_]+=m$' "${LINUX_SRC}/.config" \
+                          | cut -d= -f1 || true)
+          HAOS_M_COUNT=$(echo "${HAOS_M_SYMS}" | grep -c . || true)
+          echo "[INFO] ${HAOS_M_COUNT} CONFIG symbols are =m in the HAOS base kernel."
+
+          # Patch config for base (non-patched) modules only.
+          BASE_MODS=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            --board "${{ matrix.board }}" base-module-names | paste -sd, -)
+          echo "[INFO] Patching config for base modules: ${BASE_MODS}"
+          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" \
+            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" --only-modules "${BASE_MODS}"
+
+          # Determine ALL target =m symbols (base + patched) so promotion
+          # preserves patched module symbols for later steps.
+          ALL_TARGET_M_SYMS=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            --board "${{ matrix.board }}" config-assignments-json \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(e['symbol'] for e in d if e['value']=='m'))")
+
+          # Promote pre-existing =m symbols to =y, preserving all our targets.
+          PROMOTED=0
+          KEPT=0
+          for sym in ${HAOS_M_SYMS}; do
+            if echo " ${ALL_TARGET_M_SYMS} " | grep -qF " ${sym} "; then
+              echo "[KEEP] ${sym}=m  (our build target)"
+              KEPT=$((KEPT + 1))
+              continue
+            fi
+            if grep -q "^${sym}=m$" "${LINUX_SRC}/.config"; then
+              sed -i "s/^${sym}=m\$/${sym}=y/" "${LINUX_SRC}/.config"
+              PROMOTED=$((PROMOTED + 1))
+            fi
+          done
+          echo "[INFO] Promoted ${PROMOTED} HAOS-native =m modules to =y."
+          echo "[INFO] Kept     ${KEPT} symbols as =m (our build targets)."
+
+          make -C "${LINUX_SRC}" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            olddefconfig \
+            2>&1 | tail -30
+
+          # Resolve Buildroot cross-compiler.
+          OS_DIR="${GITHUB_WORKSPACE}/operating-system"
+          case "${ARCH}" in
+            arm64) MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/aarch64-buildroot-linux-gnu-" ;;
+            x86)   MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/x86_64-buildroot-linux-gnu-" ;;
+            *)     MODULE_CROSS_COMPILE="${CROSS_COMPILE}" ;;
+          esac
+          if [[ ! -x "${MODULE_CROSS_COMPILE}gcc" ]]; then
+            MODULE_CROSS_COMPILE="${CROSS_COMPILE}"
+          fi
+          echo "[INFO] Module build CROSS_COMPILE=${MODULE_CROSS_COMPILE}"
+
+          echo "[INFO] Building base kernel modules ..."
+          make -C "${LINUX_SRC}" \
+            ARCH="${ARCH}" \
+            KBUILD_MODPOST_WARN=1 \
+            CROSS_COMPILE="${MODULE_CROSS_COMPILE}" \
+            modules \
+            2>&1 | tail -100
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Phase 2: Build patched modules (one at a time, continue on error)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Integrate and build quic module
+        id: build-quic
+        if: steps.precheck.outputs.should_build == 'true'
+        continue-on-error: true
+        env:
+          ARCH: ${{ steps.arch.outputs.ARCH }}
+          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
+        run: |
+          set -euo pipefail
+
+          # Check if quic is in the patched module list for this board.
+          QUIC_ENABLED=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            --board "${{ matrix.board }}" patched-module-names-json \
+            | python3 -c "import sys,json; names=json.load(sys.stdin); print('true' if 'quic' in names else 'false')")
+          if [[ "${QUIC_ENABLED}" == "false" ]]; then
+            echo "[INFO] quic not configured for board '${{ matrix.board }}', skipping."
             exit 0
           fi
 
-          # If the kernel already ships ZFS natively (future upstream
-          # integration), skip the out-of-tree injection entirely.
+          # Skip if QUIC is already native in this kernel.
+          if [[ -f "${LINUX_SRC}/net/quic/Kconfig" ]]; then
+            echo "[INFO] net/quic/Kconfig already present – QUIC is native. Skipping."
+            exit 0
+          fi
+
+          echo "[INFO] Integrating QUIC out-of-tree module from lxin/quic ..."
+          QUIC_MODULES_SRC="${GITHUB_WORKSPACE}/lxin-quic/modules"
+
+          cp -r "${QUIC_MODULES_SRC}/include/." "${LINUX_SRC}/include/"
+          cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
+          sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
+
+          grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
+            echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
+          grep -qF 'source "net/quic/Kconfig"' "${LINUX_SRC}/net/Kconfig" || \
+            echo 'source "net/quic/Kconfig"' >> "${LINUX_SRC}/net/Kconfig"
+
+          echo "[INFO] QUIC source integrated. Patching config and building ..."
+
+          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" \
+            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" --only-modules quic
+
+          make -C "${LINUX_SRC}" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            olddefconfig \
+            2>&1 | tail -30
+
+          OS_DIR="${GITHUB_WORKSPACE}/operating-system"
+          case "${ARCH}" in
+            arm64) MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/aarch64-buildroot-linux-gnu-" ;;
+            x86)   MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/x86_64-buildroot-linux-gnu-" ;;
+            *)     MODULE_CROSS_COMPILE="${CROSS_COMPILE}" ;;
+          esac
+          [[ -x "${MODULE_CROSS_COMPILE}gcc" ]] || MODULE_CROSS_COMPILE="${CROSS_COMPILE}"
+
+          make -C "${LINUX_SRC}" \
+            ARCH="${ARCH}" \
+            KBUILD_MODPOST_WARN=1 \
+            CROSS_COMPILE="${MODULE_CROSS_COMPILE}" \
+            modules \
+            2>&1 | tail -100
+
+          echo "[INFO] QUIC module built successfully."
+
+      - name: Integrate and build zfs module
+        id: build-zfs
+        if: steps.precheck.outputs.should_build == 'true'
+        continue-on-error: true
+        env:
+          ARCH: ${{ steps.arch.outputs.ARCH }}
+          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
+        run: |
+          set -euo pipefail
+
+          # Check if zfs is in the patched module list for this board.
+          ZFS_ENABLED=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            --board "${{ matrix.board }}" patched-module-names-json \
+            | python3 -c "import sys,json; names=json.load(sys.stdin); print('true' if 'zfs' in names else 'false')")
+          if [[ "${ZFS_ENABLED}" == "false" ]]; then
+            echo "[INFO] zfs not configured for board '${{ matrix.board }}', skipping."
+            exit 0
+          fi
+
+          # Skip if ZFS is already native in this kernel.
           if [[ -f "${LINUX_SRC}/fs/zfs/Kconfig" ]]; then
-            echo "[INFO] fs/zfs/Kconfig already present – ZFS is native in this kernel. Skipping integration."
+            echo "[INFO] fs/zfs/Kconfig already present – ZFS is native. Skipping."
             exit 0
           fi
 
-          # ZFS configure checks for UTS_RELEASE in include/generated/utsrelease.h,
-          # which is only generated by 'make prepare'.  Run it now so the ZFS
-          # configure script can discover the kernel version.
-          echo "[INFO] Running 'make prepare' to generate kernel headers (utsrelease.h etc.) ..."
+          # ZFS configure needs utsrelease.h from 'make prepare'.
+          echo "[INFO] Running 'make prepare' for ZFS configure ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
             CROSS_COMPILE="${CROSS_COMPILE}" \
@@ -442,25 +543,15 @@ jobs:
 
           cd "${ZFS_SRC}"
 
-          # Generate the configure script from configure.ac.  The ZFS git
-          # repository does not commit the auto-generated configure script;
-          # autogen.sh runs autoconf/automake/libtool to produce it.
           ./autogen.sh
 
-          # Configure ZFS for kernel-only linux-builtin mode.
-          # --with-config=kernel skips all userspace library checks.
-          # --enable-linux-builtin prepares the sources for copy-builtin.
           ./configure \
             --with-linux="${LINUX_SRC}" \
             --with-linux-obj="${LINUX_SRC}" \
             --with-config=kernel \
             --enable-linux-builtin
 
-          # In linux-builtin mode, OpenZFS configure skips export checks and
-          # may enable code paths which reference GPL-only symbols
-          # (trace_event_*, bpf_trace_run*, kernel_fpu_* / kernel_neon_*).
-          # Force these probes off so resulting CDDL modules don't fail to
-          # load with "Unknown symbol ... (err -2)".
+          # Force-disable GPL-only symbol probes in zfs_config.h.
           ZFS_CFG_H="${ZFS_SRC}/zfs_config.h"
           if [[ -f "${ZFS_CFG_H}" ]]; then
             for sym in \
@@ -473,10 +564,6 @@ jobs:
               sed -i "s|^#define ${sym} .*|/* #undef ${sym} */|" "${ZFS_CFG_H}" || true
             done
 
-            # x86 SIMD path requires exactly one selector macro:
-            #   KERNEL_EXPORTS_X86_FPU or HAVE_KERNEL_FPU_INTERNAL
-            # Prefer the internal path in linux-builtin mode. If neither is
-            # present after the sanitization above, define HAVE_KERNEL_FPU_INTERNAL.
             has_exports=0
             has_internal=0
             grep -q '^#define KERNEL_EXPORTS_X86_FPU\b' "${ZFS_CFG_H}" && has_exports=1 || true
@@ -492,100 +579,76 @@ jobs:
             fi
           fi
 
-          # Copy ZFS sources (module/ + include/) into the kernel source tree
-          # under fs/zfs/ and register them in fs/Kconfig and fs/Makefile.
           ./copy-builtin "${LINUX_SRC}"
 
-          echo "[INFO] ZFS module integrated into kernel source."
+          echo "[INFO] ZFS source integrated. Patching config and building ..."
 
-      - name: Patch kernel config and build modules
-        if: steps.precheck.outputs.should_build == 'true'
-        env:
-          ARCH: ${{ steps.arch.outputs.ARCH }}
-          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
-        run: |
-          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
 
-          # ── Step 1: Snapshot all CONFIG symbols that are already =m in the
-          # HAOS merged config.  These are modules HAOS already builds; after
-          # our patch they will be promoted to =y so that 'make modules' skips
-          # them and only compiles the modules we are explicitly adding.
-          HAOS_M_SYMS=$(grep -E '^[A-Z0-9_]+=m$' "${LINUX_SRC}/.config" \
-                          | cut -d= -f1 || true)
-          HAOS_M_COUNT=$(echo "${HAOS_M_SYMS}" | grep -c . || true)
-          echo "[INFO] ${HAOS_M_COUNT} CONFIG symbols are =m in the HAOS base kernel."
+          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" \
+            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" --only-modules zfs
 
-          # ── Step 2: Patch the fully merged kernel config so we only modify the
-          # effective value, avoiding fragment-order overrides (e.g. y -> m).
-          echo "[INFO] Patching merged kernel config: ${LINUX_SRC}/.config"
-          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" "${LINUX_SRC}/.config" "${{ matrix.board }}"
-
-          # ── Step 3: Determine which CONFIG symbols we explicitly set to =m.
-          TARGET_M_SYMS=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
-            --board "${{ matrix.board }}" config-assignments-json \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(e['symbol'] for e in d if e['value']=='m'))")
-
-          # ── Step 4: Promote pre-existing =m symbols to =y so that
-          # 'make modules' skips them, unless they are one of our explicit
-          # targets (which must remain =m so a .ko is produced).
-          #
-          # Why =y and not =n?  Setting to =y marks the feature as built-in –
-          # the kernel build system recognises it as "available" when resolving
-          # dependencies of our modules, without actually compiling a .ko.
-          PROMOTED=0
-          KEPT=0
-          for sym in ${HAOS_M_SYMS}; do
-            # Check if this symbol is one of our explicit =m targets.
-            if echo " ${TARGET_M_SYMS} " | grep -qF " ${sym} "; then
-              echo "[KEEP] ${sym}=m  (our build target)"
-              KEPT=$((KEPT + 1))
-              continue
-            fi
-            # Only touch it if it is still =m after our patch.
-            if grep -q "^${sym}=m$" "${LINUX_SRC}/.config"; then
-              sed -i "s/^${sym}=m\$/${sym}=y/" "${LINUX_SRC}/.config"
-              PROMOTED=$((PROMOTED + 1))
-            fi
-          done
-          echo "[INFO] Promoted ${PROMOTED} HAOS-native =m modules to =y (already shipped by HAOS, skipping rebuild)."
-          echo "[INFO] Kept     ${KEPT} symbols as =m (our build targets)."
-
-          echo "[INFO] Running kernel olddefconfig after promotion ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             olddefconfig \
             2>&1 | tail -30
 
-          # Confirm our targets survived olddefconfig.
-          echo "[INFO] Target module config values after olddefconfig:"
-          for sym in ${TARGET_M_SYMS}; do
-            val=$(grep -E "^${sym}=" "${LINUX_SRC}/.config" | head -n1 || echo "${sym}=MISSING")
-            echo "  ${val}"
-          done
-
-          # Prefer Buildroot's internal cross toolchain if present.
           OS_DIR="${GITHUB_WORKSPACE}/operating-system"
           case "${ARCH}" in
             arm64) MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/aarch64-buildroot-linux-gnu-" ;;
             x86)   MODULE_CROSS_COMPILE="${OS_DIR}/output/host/bin/x86_64-buildroot-linux-gnu-" ;;
             *)     MODULE_CROSS_COMPILE="${CROSS_COMPILE}" ;;
           esac
-          if [[ ! -x "${MODULE_CROSS_COMPILE}gcc" ]]; then
-            MODULE_CROSS_COMPILE="${CROSS_COMPILE}"
-          fi
-          echo "[INFO] Module build CROSS_COMPILE=${MODULE_CROSS_COMPILE}"
+          [[ -x "${MODULE_CROSS_COMPILE}gcc" ]] || MODULE_CROSS_COMPILE="${CROSS_COMPILE}"
 
-          # Build only the kernel modules using the kernel's own Makefile.
-          # Because we promoted all pre-existing =m entries to =y, 'make modules'
-          # now only compiles the small set of modules we explicitly added.
-          echo "[INFO] Building kernel modules in ${LINUX_SRC} ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
             KBUILD_MODPOST_WARN=1 \
             CROSS_COMPILE="${MODULE_CROSS_COMPILE}" \
             modules \
             2>&1 | tail -100
+
+          echo "[INFO] ZFS module built successfully."
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Phase 3: Write build manifest (records which patched modules failed)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Write build manifest
+        if: steps.precheck.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ matrix.version }}"
+          BOARD="${{ matrix.board }}"
+          OUT_DIR="output_modules/${VERSION}/${BOARD}"
+          mkdir -p "${OUT_DIR}"
+
+          QUIC_OUTCOME="${{ steps.build-quic.outcome }}"
+          ZFS_OUTCOME="${{ steps.build-zfs.outcome }}"
+
+          echo "[INFO] Patched module outcomes: quic=${QUIC_OUTCOME}, zfs=${ZFS_OUTCOME}"
+
+          python3 -c "
+          import json
+          failed = {}
+          if '${QUIC_OUTCOME}' == 'failure':
+              failed['quic'] = '${BOARD}'
+          if '${ZFS_OUTCOME}' == 'failure':
+              failed['zfs'] = '${BOARD}'
+          manifest = {
+              'board': '${BOARD}',
+              'version': '${VERSION}',
+              'failed': failed,
+          }
+          print(json.dumps(manifest, indent=2))
+          with open('${OUT_DIR}/build_manifest.json', 'w') as f:
+              json.dump(manifest, f, indent=2)
+          "
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Artifact collection
+      # ─────────────────────────────────────────────────────────────────────
 
       - name: Extract and rename .ko files
         if: steps.precheck.outputs.should_build == 'true'
@@ -639,7 +702,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: modules-${{ matrix.version }}-${{ matrix.board }}
-          path: output_modules/${{ matrix.version }}/${{ matrix.board }}/*.ko
+          path: |
+            output_modules/${{ matrix.version }}/${{ matrix.board }}/*.ko
+            output_modules/${{ matrix.version }}/${{ matrix.board }}/build_manifest.json
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
@@ -704,15 +769,55 @@ jobs:
 
       - name: List assets to be published
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
-        run: find release-assets -type f | sort
+        run: find release-assets -type f -name '*.ko.xz' | sort
+
+      - name: Aggregate build manifests
+        id: aggregate-manifests
+        if: steps.check-artifacts.outputs.has_artifacts == 'true'
+        run: |
+          set -euo pipefail
+
+          # Collect all build_manifest.json files from downloaded artifacts.
+          MANIFESTS=$(find release-assets -name 'build_manifest.json' 2>/dev/null || true)
+          if [[ -z "${MANIFESTS}" ]]; then
+            echo "[INFO] No build manifests found – assuming all modules built OK."
+            echo "failed_json={}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Aggregate: merge per-board failures into { module: [board1, board2, ...] }
+          FAILED_JSON=$(echo "${MANIFESTS}" | xargs python3 -c "
+          import json, sys
+          result = {}
+          for path in sys.argv[1:]:
+              with open(path) as f:
+                  data = json.load(f)
+              for module, board in data.get('failed', {}).items():
+                  result.setdefault(module, []).append(board)
+          for k in result:
+              result[k].sort()
+          print(json.dumps(result))
+          ")
+
+          echo "[INFO] Failed modules across boards: ${FAILED_JSON}"
+          echo "failed_json=${FAILED_JSON}" >> "$GITHUB_OUTPUT"
 
       - name: Render release body from config/modules.json
         if: steps.check-artifacts.outputs.has_artifacts == 'true'
         run: |
-          python3 scripts/modules_config.py \
-            release-body \
-            --version "${{ matrix.version }}" \
-            --output release-body.md
+          FAILED_JSON='${{ steps.aggregate-manifests.outputs.failed_json }}'
+          if [[ -n "${FAILED_JSON}" && "${FAILED_JSON}" != "{}" ]]; then
+            python3 scripts/modules_config.py \
+              release-body \
+              --version "${{ matrix.version }}" \
+              --output release-body.md \
+              --failed-modules-json "${FAILED_JSON}"
+          else
+            python3 scripts/modules_config.py \
+              release-body \
+              --version "${{ matrix.version }}" \
+              --output release-body.md
+          fi
 
       - name: Determine make_latest flag
         id: make-latest

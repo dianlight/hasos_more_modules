@@ -3,7 +3,7 @@
 # compilation.
 #
 # Usage:
-#   scripts/patch_config.sh <path-to-kernel.config> [<board>] [<modules-config>]
+#   scripts/patch_config.sh <path-to-kernel.config> [<board>] [<modules-config>] [--only-modules <list>]
 #
 # Arguments:
 #   <path-to-kernel.config>  Absolute or relative path to the kernel.config
@@ -12,8 +12,10 @@
 #                             Optional; used only for informational messages.
 #   <modules-config>          Path to module/config definition file.
 #                             Optional; defaults to config/modules.json.
+#   --only-modules <list>     Comma-separated module names to apply configs for.
+#                             Optional; defaults to all modules.
 #
-# The script loads all CONFIG_* assignments from config/modules.json and applies
+# The script loads CONFIG_* assignments from config/modules.json and applies
 # them to the selected kernel.config file.
 
 set -euo pipefail
@@ -25,13 +27,29 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Argument handling
 # ---------------------------------------------------------------------------
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <path-to-kernel.config> [<board>] [<modules-config>]" >&2
+    echo "Usage: $0 <path-to-kernel.config> [<board>] [<modules-config>] [--only-modules <comma-list>]" >&2
     exit 1
 fi
 
 CONFIG_FILE="$1"
 BOARD="${2:-unknown}"
 MODULES_CONFIG="${3:-${REPO_ROOT}/config/modules.json}"
+
+# Parse optional flags after positional args
+shift; shift 2>/dev/null || true; shift 2>/dev/null || true
+ONLY_MODULES=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --only-modules)
+            ONLY_MODULES="$2"
+            shift 2
+            ;;
+        *)
+            echo "[WARN] Unknown argument: $1" >&2
+            shift
+            ;;
+    esac
+done
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
     echo "[ERROR] Config file not found: ${CONFIG_FILE}" >&2
@@ -87,7 +105,12 @@ set_config_value() {
 # ---------------------------------------------------------------------------
 
 echo "[INFO] Applying configured symbols ..."
-ASSIGNMENTS_JSON=$(python3 "${SCRIPT_DIR}/modules_config.py" --config "${MODULES_CONFIG}" --board "${BOARD}" config-assignments-json)
+ONLY_MODULES_ARG=""
+if [[ -n "${ONLY_MODULES}" ]]; then
+    ONLY_MODULES_ARG="--only-modules ${ONLY_MODULES}"
+    echo "[INFO] Filtering to modules: ${ONLY_MODULES}"
+fi
+ASSIGNMENTS_JSON=$(python3 "${SCRIPT_DIR}/modules_config.py" --config "${MODULES_CONFIG}" --board "${BOARD}" config-assignments-json ${ONLY_MODULES_ARG})
 mapfile -t ASSIGNMENTS < <(echo "${ASSIGNMENTS_JSON}" | jq -r '.[] | "\(.symbol)|\(.type)|\(.value)"')
 
 if [[ ${#ASSIGNMENTS[@]} -eq 0 ]]; then
