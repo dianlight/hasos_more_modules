@@ -223,18 +223,22 @@ jobs:
 
           # First, try to find a board-level kernel.config fragment in
           # BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES.
+          # HAOS 18+ renamed BR2_EXTERNAL_HASSOS_PATH to BR2_EXTERNAL_HAOS_PATH.
+          # Match either spelling with HA(SS)?OS.
+          EXTERNAL_RE='\$\(BR2_EXTERNAL_HA(SS)?OS_PATH\)'
+
           KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES' "${DEFCONFIG}" \
-            | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^" ]+kernel\.config' \
+            | grep -oE "${EXTERNAL_RE}/[^\" ]+kernel\\.config" \
             | tail -1 \
-            | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
+            | sed -E "s|${EXTERNAL_RE}|operating-system/buildroot-external|" \
             || true)
 
           # If no fragment was found, fall back to BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE
           # (used by boards like khadas_vim3, odroid_c2, odroid_c4).
           if [[ -z "${KERNEL_CONFIG}" ]]; then
             KERNEL_CONFIG=$(grep 'BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE' "${DEFCONFIG}" \
-              | grep -oE '\$\(BR2_EXTERNAL_HASSOS_PATH\)/[^"]+' \
-              | sed 's|\$(BR2_EXTERNAL_HASSOS_PATH)|operating-system/buildroot-external|' \
+              | grep -oE "${EXTERNAL_RE}/[^\"]+" \
+              | sed -E "s|${EXTERNAL_RE}|operating-system/buildroot-external|" \
               || true)
           fi
 
