@@ -22,7 +22,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: opencode/deepseek-v4-flash-free
-          shared: true
+          share: true
           use_github_token: true
           prompt: |
             Review this pull request:
