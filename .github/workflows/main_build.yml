@@ -433,6 +433,13 @@ jobs:
           fi
           echo "[INFO] Module build CROSS_COMPILE=${MODULE_CROSS_COMPILE}"
 
+          echo "[INFO] Running 'make prepare' for kernel module build ..."
+          make -C "${LINUX_SRC}" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            prepare \
+            2>&1 | tail -60
+
           echo "[INFO] Building base kernel modules ..."
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
