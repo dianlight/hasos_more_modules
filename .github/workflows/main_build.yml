@@ -58,10 +58,46 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Resolve explicit board list from workflow_dispatch input or repository_dispatch payload.
+          # ── Priority order for board selection ──────────────────────────────
+          # 1. workflow_dispatch input  →  explicit user choice
+          # 2. repository_dispatch payload  →  caller-specified list
+          # 3. pull_request event  →  parse "boards: <list>" from PR body,
+          #                           fall back to default fast-CI set,
+          #                           or "all" to build every board
+          # 4. everything else (schedule, push)  →  auto-detect from HAOS repo
+          # ────────────────────────────────────────────────────────────────────
+
+          PR_DEFAULT_BOARDS="generic_aarch64,generic_x86_64,rpi4_64"
+
           BOARDS_INPUT="${{ github.event.inputs.boards }}"
+
           if [[ -z "${BOARDS_INPUT}" && "${{ github.event_name }}" == "repository_dispatch" ]]; then
             BOARDS_INPUT="${{ github.event.client_payload.boards }}"
+          fi
+
+          if [[ -z "${BOARDS_INPUT}" && "${{ github.event_name }}" == "pull_request" ]]; then
+            # Extract "boards: <value>" from the PR body (case-insensitive, first match).
+            PR_BODY=$(cat <<'PR_BODY_EOF'
+${{ github.event.pull_request.body }}
+PR_BODY_EOF
+)
+            BOARDS_INPUT=$(echo "${PR_BODY}" \
+              | grep -iE '^[[:space:]]*boards[[:space:]]*:[[:space:]]*' \
+              | head -1 \
+              | sed -E 's/^[[:space:]]*boards[[:space:]]*:[[:space:]]*//i' \
+              | tr -d '\r')
+
+            if [[ -z "${BOARDS_INPUT}" ]]; then
+              # No "boards:" line in PR body — use the default fast-CI set.
+              BOARDS_INPUT="${PR_DEFAULT_BOARDS}"
+              echo "[INFO] PR body has no 'boards:' line — using default: ${BOARDS_INPUT}"
+            elif [[ "${BOARDS_INPUT,,}" == "all" ]]; then
+              # Explicit "all" — clear the input so the auto-detect path runs below.
+              BOARDS_INPUT=""
+              echo "[INFO] PR body specifies 'all' — detecting all boards from HAOS repo."
+            else
+              echo "[INFO] PR body specifies boards: ${BOARDS_INPUT}"
+            fi
           fi
 
           if [[ -n "${BOARDS_INPUT}" ]]; then
@@ -409,9 +445,12 @@ jobs:
           if [[ -d "${RPI_MEDIA}/rp1-cfe" && -d "${RPI_MEDIA}/rp1_cfe" ]]; then
             echo "[INFO] Both rp1-cfe/ and rp1_cfe/ found — removing legacy rp1-cfe/"
             rm -rf "${RPI_MEDIA}/rp1-cfe"
-            # Drop the legacy entry from the parent Makefile to avoid dangling obj- lines.
+            # Drop the legacy entry from both Makefile (obj- line) and Kconfig
+            # (source line). olddefconfig reads Kconfig before any compilation,
+            # so both files must be cleaned up or it fails with "can't open file".
             sed -i '/rp1-cfe/d' "${RPI_MEDIA}/Makefile" || true
-            echo "[INFO] rp1-cfe/ removed successfully."
+            sed -i '/rp1-cfe/d' "${RPI_MEDIA}/Kconfig"  || true
+            echo "[INFO] rp1-cfe/ removed and parent Makefile/Kconfig patched."
           else
             echo "[INFO] No rp1-cfe/rp1_cfe duplicate detected, nothing to do."
           fi
