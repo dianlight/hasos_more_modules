@@ -371,6 +371,25 @@ jobs:
           # Export the absolute path so subsequent steps can reference it via $LINUX_SRC.
           echo "LINUX_SRC=${GITHUB_WORKSPACE}/operating-system/${LINUX_SRC_REL}" >> "$GITHUB_ENV"
 
+      # Some RPi kernels (HAOS 18+) ship both rp1-cfe/ (hyphen, legacy) and
+      # rp1_cfe/ (underscore, new name) under drivers/media/platform/raspberrypi/.
+      # Both directories contain identical symbols, so `make modules` links
+      # vmlinux.o twice and dies with "multiple definition" errors.
+      # Remove whichever directory is the legacy one (hyphen) when both exist.
+      - name: Deduplicate rp1-cfe / rp1_cfe driver directories (RPi kernel quirk)
+        if: steps.precheck.outputs.should_build == 'true'
+        run: |
+          RPI_MEDIA="${LINUX_SRC}/drivers/media/platform/raspberrypi"
+          if [[ -d "${RPI_MEDIA}/rp1-cfe" && -d "${RPI_MEDIA}/rp1_cfe" ]]; then
+            echo "[INFO] Both rp1-cfe/ and rp1_cfe/ found — removing legacy rp1-cfe/"
+            rm -rf "${RPI_MEDIA}/rp1-cfe"
+            # Drop the legacy entry from the parent Makefile to avoid dangling obj- lines.
+            sed -i '/rp1-cfe/d' "${RPI_MEDIA}/Makefile" || true
+            echo "[INFO] rp1-cfe/ removed successfully."
+          else
+            echo "[INFO] No rp1-cfe/rp1_cfe duplicate detected, nothing to do."
+          fi
+
       # ─────────────────────────────────────────────────────────────────────
       # Phase 1: Build base modules (no kernel source patching required)
       # ─────────────────────────────────────────────────────────────────────
