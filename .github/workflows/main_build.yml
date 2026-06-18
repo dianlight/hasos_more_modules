@@ -57,6 +57,10 @@ jobs:
         id: detect
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass PR body as an env var to avoid embedding ${{ }} expressions
+          # inside the run: | block at column-0 (which terminates the YAML
+          # block scalar prematurely and causes a static YAML parse error).
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           # ── Priority order for board selection ──────────────────────────────
           # 1. workflow_dispatch input  →  explicit user choice
@@ -77,10 +81,7 @@ jobs:
 
           if [[ -z "${BOARDS_INPUT}" && "${{ github.event_name }}" == "pull_request" ]]; then
             # Extract "boards: <value>" from the PR body (case-insensitive, first match).
-            PR_BODY=$(cat <<'PR_BODY_EOF'
-${{ github.event.pull_request.body }}
-PR_BODY_EOF
-)
+            # PR_BODY is injected via env: above to avoid YAML block-scalar issues.
             BOARDS_INPUT=$(echo "${PR_BODY}" \
               | grep -iE '^[[:space:]]*boards[[:space:]]*:[[:space:]]*' \
               | head -1 \
