@@ -14,10 +14,22 @@ on:
           Leave empty to auto-detect from the latest upstream release.
         required: false
         default: ""
+      boards:
+        description: >
+          Comma-separated list of boards to build (e.g. rpi3_64,rpi4_64,ova).
+          Leave empty to build all boards detected from the HAOS repository.
+        required: false
+        default: ""
 
   # Allow other workflows / external systems to trigger this workflow.
+  # Supports optional client_payload.boards (comma-separated) to restrict boards.
   repository_dispatch:
     types: [build-modules]
+
+  # Run on every pull request targeting main to validate changes compile.
+  pull_request:
+    branches:
+      - main
 
 # Only run one build at a time; cancel any in-progress run for the same ref.
 concurrency:
@@ -46,22 +58,41 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Query the GitHub Contents API for buildroot-external/configs/
-          RESPONSE=$(curl -fsSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${HAOS_REPO}/contents/buildroot-external/configs")
+          # Resolve explicit board list from workflow_dispatch input or repository_dispatch payload.
+          BOARDS_INPUT="${{ github.event.inputs.boards }}"
+          if [[ -z "${BOARDS_INPUT}" && "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            BOARDS_INPUT="${{ github.event.client_payload.boards }}"
+          fi
 
-          # Extract file names, keep only *_defconfig, strip the suffix.
-          BOARDS=$(echo "${RESPONSE}" \
-            | jq -r '.[].name | select(endswith("_defconfig")) | sub("_defconfig$"; "")' \
-            | sort \
-            | jq -R . \
-            | jq -sc .)
+          if [[ -n "${BOARDS_INPUT}" ]]; then
+            # Convert comma-separated list to a sorted JSON array, stripping whitespace.
+            BOARDS=$(echo "${BOARDS_INPUT}" \
+              | tr ',' '\n' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | grep -v '^$' \
+              | sort \
+              | jq -R . \
+              | jq -sc .)
+            echo "boards=${BOARDS}" >> "$GITHUB_OUTPUT"
+            echo "Using explicit board list: ${BOARDS}"
+          else
+            # Query the GitHub Contents API for buildroot-external/configs/
+            RESPONSE=$(curl -fsSL \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${HAOS_REPO}/contents/buildroot-external/configs")
 
-          echo "boards=${BOARDS}" >> "$GITHUB_OUTPUT"
-          echo "Detected boards: ${BOARDS}"
+            # Extract file names, keep only *_defconfig, strip the suffix.
+            BOARDS=$(echo "${RESPONSE}" \
+              | jq -r '.[].name | select(endswith("_defconfig")) | sub("_defconfig$"; "")' \
+              | sort \
+              | jq -R . \
+              | jq -sc .)
+
+            echo "boards=${BOARDS}" >> "$GITHUB_OUTPUT"
+            echo "Detected boards: ${BOARDS}"
+          fi
 
   # ---------------------------------------------------------------------------
   # Job 2 – Detect which HAOS versions still need to be compiled.
@@ -365,6 +396,25 @@ jobs:
 
           # Export the absolute path so subsequent steps can reference it via $LINUX_SRC.
           echo "LINUX_SRC=${GITHUB_WORKSPACE}/operating-system/${LINUX_SRC_REL}" >> "$GITHUB_ENV"
+
+      # Some RPi kernels (HAOS 18+) ship both rp1-cfe/ (hyphen, legacy) and
+      # rp1_cfe/ (underscore, new name) under drivers/media/platform/raspberrypi/.
+      # Both directories contain identical symbols, so `make modules` links
+      # vmlinux.o twice and dies with "multiple definition" errors.
+      # Remove whichever directory is the legacy one (hyphen) when both exist.
+      - name: Deduplicate rp1-cfe / rp1_cfe driver directories (RPi kernel quirk)
+        if: steps.precheck.outputs.should_build == 'true'
+        run: |
+          RPI_MEDIA="${LINUX_SRC}/drivers/media/platform/raspberrypi"
+          if [[ -d "${RPI_MEDIA}/rp1-cfe" && -d "${RPI_MEDIA}/rp1_cfe" ]]; then
+            echo "[INFO] Both rp1-cfe/ and rp1_cfe/ found — removing legacy rp1-cfe/"
+            rm -rf "${RPI_MEDIA}/rp1-cfe"
+            # Drop the legacy entry from the parent Makefile to avoid dangling obj- lines.
+            sed -i '/rp1-cfe/d' "${RPI_MEDIA}/Makefile" || true
+            echo "[INFO] rp1-cfe/ removed successfully."
+          else
+            echo "[INFO] No rp1-cfe/rp1_cfe duplicate detected, nothing to do."
+          fi
 
       # ─────────────────────────────────────────────────────────────────────
       # Phase 1: Build base modules (no kernel source patching required)
@@ -743,8 +793,28 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Job 4 – Create a GitHub Release and attach the compiled modules.
+  # Job 4 – Summary gate required by branch protection on pull requests.
   # ---------------------------------------------------------------------------
+  pr-check:
+    name: PR build check
+    needs: [detect-versions, build]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Report build result
+        run: |
+          BUILD_RESULT="${{ needs.build.result }}"
+          VERSIONS_FOUND="${{ needs.detect-versions.outputs.has_versions }}"
+          echo "Build result: ${BUILD_RESULT}"
+          echo "Versions found: ${VERSIONS_FOUND}"
+          if [[ "${BUILD_RESULT}" == "failure" ]]; then
+            echo "Build job failed — blocking PR."
+            exit 1
+          fi
+          echo "All checks passed."
+
   release:
     name: Create release ${{ matrix.version }}
     needs: [detect-boards, detect-versions, build]
@@ -754,6 +824,7 @@ jobs:
     # "Abort if build failed" qui sotto propaga l'errore esplicitamente.
     if: >-
       always() &&
+      github.event_name != 'pull_request' &&
       needs.detect-versions.outputs.has_versions == 'true'
     runs-on: ubuntu-24.04
     strategy:
