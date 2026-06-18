@@ -108,7 +108,7 @@ jobs:
       has_versions: ${{ steps.detect.outputs.has_versions }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
@@ -173,7 +173,7 @@ jobs:
 
     steps:
       - name: Checkout hasos_more_modules
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Precheck whether this variant has anything to build
         id: precheck
@@ -195,7 +195,7 @@ jobs:
 
       - name: Checkout home-assistant/operating-system @ ${{ matrix.version }}
         if: steps.precheck.outputs.should_build == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
         with:
           repository: home-assistant/operating-system
           ref: ${{ matrix.version }}
@@ -205,7 +205,7 @@ jobs:
 
       - name: Checkout lxin/quic (out-of-tree QUIC kernel module)
         if: steps.precheck.outputs.should_build == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
         with:
           repository: lxin/quic
           # renovate: datasource=git-refs packageName=https://github.com/lxin/quic
@@ -216,7 +216,7 @@ jobs:
       - name: Checkout openzfs/zfs (out-of-tree ZFS kernel module)
         # Skip checkout for boards that always exclude ZFS (saves ~600 MB clone time).
         if: steps.precheck.outputs.should_build == 'true' && !contains(fromJson('["rpi3_64","rpi4_64","rpi5_64","yellow"]'), matrix.board)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
         with:
           repository: openzfs/zfs
           # renovate: datasource=github-releases packageName=openzfs/zfs
@@ -819,7 +819,7 @@ jobs:
           exit 1
 
       - name: Checkout hasos_more_modules
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Download all compiled artifacts for ${{ matrix.version }}
         uses: actions/download-artifact@v8
