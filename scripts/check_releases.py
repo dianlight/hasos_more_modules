@@ -204,30 +204,67 @@ def fetch_compiled_versions(
     return compiled
 
 
+def aggregate_manifests(manifest_paths: list[str]) -> str:
+    """Aggregate build_manifest_*.json files into a single failure dict.
+
+    Returns a JSON string mapping module names to lists of failed boards.
+    """
+    result: dict[str, list[str]] = {}
+    for path in manifest_paths:
+        with open(path) as f:
+            data = json.load(f)
+        for module, board in data.get("failed", {}).items():
+            result.setdefault(module, []).append(board)
+    for k in result:
+        result[k].sort()
+    return json.dumps(result)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Check which HAOS releases still need kernel modules compiled."
     )
-    parser.add_argument(
+    sub = parser.add_subparsers(dest="command")
+
+    main_parser = sub.add_parser(
+        "check",
+        help="Check which HAOS releases need compilation",
+    )
+    main_parser.add_argument(
         "--haos-repo",
         default=os.environ.get("HAOS_REPO", DEFAULT_HAOS_REPO),
         help="Source HAOS repository (default: %(default)s).",
     )
-    parser.add_argument(
+    main_parser.add_argument(
         "--this-repo",
         default=os.environ.get("THIS_REPO", DEFAULT_THIS_REPO),
         help="This repository where compiled assets are published (default: %(default)s).",
     )
-    parser.add_argument(
+    main_parser.add_argument(
         "--token",
         default=os.environ.get("GITHUB_TOKEN"),
         help="GitHub personal access token (or set GITHUB_TOKEN env var).",
     )
+
+    agg_parser = sub.add_parser(
+        "aggregate-manifests",
+        help="Aggregate build_manifest_*.json files into a failure dict",
+    )
+    agg_parser.add_argument(
+        "manifest_paths",
+        nargs="+",
+        help="Paths to build_manifest_*.json files",
+    )
+
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.command == "aggregate-manifests":
+        print(aggregate_manifests(args.manifest_paths))
+        return 0
 
     print(
         f"[INFO] Fetching HAOS releases from {args.haos_repo} ...",
