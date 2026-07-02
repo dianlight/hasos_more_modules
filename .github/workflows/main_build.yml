@@ -166,6 +166,7 @@ jobs:
             VERSIONS="${{ github.event.client_payload.version }}"
           else
             VERSIONS=$(python3 scripts/check_releases.py \
+              check \
               --haos-repo "${HAOS_REPO}" \
               --this-repo "${THIS_REPO}" \
               --token     "${GITHUB_TOKEN}")
@@ -767,7 +768,7 @@ jobs:
               'failed': failed,
           }
           print(json.dumps(manifest, indent=2))
-          with open('${OUT_DIR}/build_manifest.json', 'w') as f:
+          with open('${OUT_DIR}/build_manifest_${BOARD}.json', 'w') as f:
               json.dump(manifest, f, indent=2)
           "
 
@@ -829,7 +830,7 @@ jobs:
           name: modules-${{ matrix.version }}-${{ matrix.board }}
           path: |
             output_modules/${{ matrix.version }}/${{ matrix.board }}/*.ko
-            output_modules/${{ matrix.version }}/${{ matrix.board }}/build_manifest.json
+            output_modules/${{ matrix.version }}/${{ matrix.board }}/build_manifest_*.json
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
@@ -923,8 +924,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Collect all build_manifest.json files from downloaded artifacts.
-          MANIFESTS=$(find release-assets -name 'build_manifest.json' 2>/dev/null || true)
+          # Collect all build_manifest_*.json files from downloaded artifacts.
+          MANIFESTS=$(find release-assets -name 'build_manifest_*.json' 2>/dev/null || true)
           if [[ -z "${MANIFESTS}" ]]; then
             echo "[INFO] No build manifests found – assuming all modules built OK."
             echo "failed_json={}" >> "$GITHUB_OUTPUT"
@@ -932,18 +933,7 @@ jobs:
           fi
 
           # Aggregate: merge per-board failures into { module: [board1, board2, ...] }
-          FAILED_JSON=$(echo "${MANIFESTS}" | xargs python3 -c "
-          import json, sys
-          result = {}
-          for path in sys.argv[1:]:
-              with open(path) as f:
-                  data = json.load(f)
-              for module, board in data.get('failed', {}).items():
-                  result.setdefault(module, []).append(board)
-          for k in result:
-              result[k].sort()
-          print(json.dumps(result))
-          ")
+          FAILED_JSON=$(python3 "${GITHUB_WORKSPACE}/scripts/check_releases.py" aggregate-manifests ${MANIFESTS})
 
           echo "[INFO] Failed modules across boards: ${FAILED_JSON}"
           echo "failed_json=${FAILED_JSON}" >> "$GITHUB_OUTPUT"
