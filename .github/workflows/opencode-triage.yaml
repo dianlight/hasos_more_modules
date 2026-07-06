@@ -21,6 +21,7 @@ jobs:
         github.event.comment.user.login != 'opencode-agent[bot]' &&
         github.event.comment.user.login != 'coderabbitai[bot]' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        (github.event.issue.state == 'open' || github.event.pull_request.state == 'open') &&
         (
           contains(github.event.comment.body, ' /oc') ||
           startsWith(github.event.comment.body, '/oc') ||
@@ -36,6 +37,7 @@ jobs:
         github.event.review.user.login != 'opencode-agent[bot]' &&
         github.event.review.user.login != 'coderabbitai[bot]' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) &&
+        (github.event.issue.state == 'open' || github.event.pull_request.state == 'open') &&
         (
           contains(github.event.review.body, ' /oc') ||
           startsWith(github.event.review.body, '/oc') ||
