@@ -170,6 +170,20 @@ jobs:
               --haos-repo "${HAOS_REPO}" \
               --this-repo "${THIS_REPO}" \
               --token     "${GITHUB_TOKEN}")
+            # PR smoke test: if no pending versions, build the latest HAOS release
+            # to validate the change compiles, even when everything is already built.
+            if [[ -z "${VERSIONS}" && "${{ github.event_name }}" == "pull_request" ]]; then
+              echo "[INFO] PR mode: no pending versions, fetching latest HAOS release for smoke test."
+              LATEST_TAG=$(curl -fsSL \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${HAOS_REPO}/releases/latest" \
+                | jq -r '.tag_name // empty')
+              if [[ -n "${LATEST_TAG}" ]]; then
+                VERSIONS="${LATEST_TAG}"
+                echo "[INFO] PR smoke test version: ${VERSIONS}"
+              fi
+            fi  
           fi
 
           if [[ -z "${VERSIONS}" ]]; then
