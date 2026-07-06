@@ -34,8 +34,10 @@ jobs:
         uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a # latest
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: opencode/north-mini-code-free
+          use_github_token: true
           prompt: |
             You are a senior software engineer. Your ONLY job in this run is to
             implement an already-approved proposal — you do not re-triage, you do
