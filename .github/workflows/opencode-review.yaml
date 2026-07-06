@@ -28,6 +28,10 @@ jobs:
           prompt: |
             Act as an expert Senior Software Engineer and Code Reviewer. Review this pull request thoroughly based strictly on the provided diff and its immediate context.
 
+            ## Context
+            - Repository: ${{ github.repository }}
+            - Pull request number: ${{ github.event.pull_request.number }}
+
             ## Mandatory output mechanism
 
             You MUST submit your review using the `gh` CLI. Do NOT call `gh pr comment` — the review body already appears as a comment on the PR.
@@ -36,12 +40,26 @@ jobs:
 
             Before submitting the new review, check for existing review threads that have been addressed by the current diff and resolve them.
 
-            Retrieve all open review threads:
+            Retrieve all open review threads via GraphQL:
 
             ```bash
-                        gh api \
-                          -H "Accept: application/vnd.github+json" \
-                          /repos/{owner}/{repo}/pulls/{pull_number}/comments
+                        gh api graphql -f query='
+                          query {
+                            repository(owner: "{owner}", name: "{repo}") {
+                              pullRequest(number: {pull_number}) {
+                                reviewThreads(first: 100) {
+                                  nodes {
+                                    id
+                                    isResolved
+                                    comments(first: 1) {
+                                      nodes { path line body }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        '
             ```
 
             For each thread whose issue is visibly fixed in the current diff, resolve it via GraphQL:
@@ -56,7 +74,7 @@ jobs:
                         '
             ```
 
-            - Use the `node_id` field from the comments response as `<THREAD_NODE_ID>`.
+            - Use the thread node's `id` field from the GraphQL query response as `<THREAD_NODE_ID>`.
             - Only resolve threads where the fix is clearly present in the diff — do not resolve threads for issues that are still open or only partially addressed.
 
             ### Step 2 — Submit the formal review with inline comments
@@ -108,4 +126,3 @@ jobs:
             - **Be actionable**: explain *why* it is an issue and always provide a fix via `suggestion` block when a concrete fix is possible.
 
             - **Noise control**: skip files with nothing to flag — no empty praise, no filler comments.
-            
