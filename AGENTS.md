@@ -1,4 +1,4 @@
-# Copilot Rules For Workflow Variant Testing
+# Agents Rules For Workflow Variant Testing
 
 ## Scope
 These instructions apply when working on `.github/workflows/main_build.yml` and when testing GitHub Actions locally with `act`.
