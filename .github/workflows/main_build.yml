@@ -261,7 +261,7 @@ jobs:
         with:
           repository: lxin/quic
           # renovate: datasource=git-refs packageName=https://github.com/lxin/quic
-          ref: 468acf7c65707f0c8bd0a17dad762e09e2b221af
+          ref: 863e714c9ee54b7b84bd7038847e3375e6dc4306
           path: lxin-quic
           fetch-depth: 1
 
