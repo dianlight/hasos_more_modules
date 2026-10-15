@@ -193,10 +193,10 @@ jobs:
           else
             # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS).
             MAX_VERSIONS=${MAX_VERSIONS:-5}
-            # Convert newline-separated list to a JSON array, sort by version (desc), take top N.
+            # Convert newline-separated list to a JSON array, sort by version
+            # (desc, PEP 440: 18.3 > 18.3.rc2 > 18.2), take top N.
             JSON=$(printf '%s\n' ${VERSIONS} \
-              | sort -V -r \
-              | head -n "${MAX_VERSIONS}" \
+              | python3 -c "import sys; from packaging.version import Version; limit=int('${MAX_VERSIONS}'); tags=sorted((t.strip() for t in sys.stdin if t.strip()), key=Version, reverse=True)[:limit]; print('\n'.join(tags))" \
               | jq -R . \
               | jq -sc .)
             echo "versions=${JSON}"      >> "$GITHUB_OUTPUT"
@@ -987,6 +987,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          python3 -c "import packaging" 2>/dev/null || pip install --quiet packaging
           VERSION="${{ matrix.version }}"
 
           # Fetch the tag of the latest stable (non-prerelease) release in this repo.
@@ -1001,8 +1002,9 @@ jobs:
             # No prior stable release – this is effectively the first; mark as latest.
             echo "make_latest=true" >> "$GITHUB_OUTPUT"
           else
-            # Use version-aware sort: if VERSION is the highest, it is >= LATEST_TAG.
-            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" | sort -V | tail -1)
+            # Use PEP 440 version-aware ordering: 18.3 > 18.3.rc2.
+            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" \\
+              | python3 -c "import sys; from packaging.version import Version; print(sorted(sys.stdin, key=lambda x: Version(x.strip()))[-1].strip())")
             if [[ "${HIGHEST}" == "${VERSION}" ]]; then
               echo "make_latest=true" >> "$GITHUB_OUTPUT"
             else
