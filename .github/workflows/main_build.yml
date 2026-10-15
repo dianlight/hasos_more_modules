@@ -588,14 +588,23 @@ jobs:
           cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
           sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
 
-          # IP_TUNNEL_RECURSION_LIMIT was backported to stable 6.12.78+ as a
-          # routing-loop fix, but WITHOUT the companion proto.recvmsg addr_len
-          # removal (a mainline >= 6.14 change). lxin/quic uses the macro as a
-          # proxy for that ABI change, so it compiles the wrong 4-arg recvmsg
-          # on 6.12.85, causing a type mismatch. Replace with an explicit check.
-          sed -i 's/#ifdef IP_TUNNEL_RECURSION_LIMIT/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)/g' \
-            "${LINUX_SRC}/net/quic/socket.c"
-          echo "[INFO] Patched net/quic/socket.c: IP_TUNNEL_RECURSION_LIMIT → KERNEL_VERSION(6,14,0)"
+          # Stable 6.18.y backported two mainline changes early:
+          # - ipv6_fl_list moved from ipv6_pinfo to inet_sock (mainline 6.19)
+          # - proto->recvmsg dropped addr_len 5-arg -> 4-arg (mainline 7.1)
+          # lxin/quic guards for 6.19 / 7.1, so it picks the old layout on
+          # 6.18.52 (HAOS 18.3) and fails. Feature-detect the actual kernel
+          # headers and force the new path when present (version-agnostic,
+          # keeps old kernels working).
+          if grep -q "ipv6_fl_list" "${LINUX_SRC}/include/net/inet_sock.h"; then
+            sed -i 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)/#if 1/' \
+              "${LINUX_SRC}/net/quic/socket.c"
+            echo "[INFO] Patched net/quic/socket.c: force inet_sock.ipv6_fl_list path (6.18 stable backport)"
+          fi
+          if ! grep -F -A3 '(*recvmsg)' "${LINUX_SRC}/include/net/sock.h" | grep -q "addr_len"; then
+            sed -i 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)/#if 1/' \
+              "${LINUX_SRC}/net/quic/socket.c"
+            echo "[INFO] Patched net/quic/socket.c: force 4-arg recvmsg path (6.18 stable backport)"
+          fi
 
           grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
             echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
