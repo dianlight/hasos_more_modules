@@ -193,10 +193,10 @@ jobs:
           else
             # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS).
             MAX_VERSIONS=${MAX_VERSIONS:-5}
-            # Convert newline-separated list to a JSON array, sort by version (desc), take top N.
+            # Convert newline-separated list to a JSON array, sort by version
+            # (desc, PEP 440: 18.3 > 18.3.rc2 > 18.2), take top N.
             JSON=$(printf '%s\n' ${VERSIONS} \
-              | sort -V -r \
-              | head -n "${MAX_VERSIONS}" \
+              | python3 -c "import sys; from packaging.version import Version; limit=int('${MAX_VERSIONS}'); tags=sorted((t.strip() for t in sys.stdin if t.strip()), key=Version, reverse=True)[:limit]; print('\n'.join(tags))" \
               | jq -R . \
               | jq -sc .)
             echo "versions=${JSON}"      >> "$GITHUB_OUTPUT"
@@ -588,14 +588,23 @@ jobs:
           cp -r "${QUIC_MODULES_SRC}/net/quic" "${LINUX_SRC}/net/"
           sed -i '/LINUXINCLUDE.*ROOTDIR/d' "${LINUX_SRC}/net/quic/Makefile"
 
-          # IP_TUNNEL_RECURSION_LIMIT was backported to stable 6.12.78+ as a
-          # routing-loop fix, but WITHOUT the companion proto.recvmsg addr_len
-          # removal (a mainline >= 6.14 change). lxin/quic uses the macro as a
-          # proxy for that ABI change, so it compiles the wrong 4-arg recvmsg
-          # on 6.12.85, causing a type mismatch. Replace with an explicit check.
-          sed -i 's/#ifdef IP_TUNNEL_RECURSION_LIMIT/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)/g' \
-            "${LINUX_SRC}/net/quic/socket.c"
-          echo "[INFO] Patched net/quic/socket.c: IP_TUNNEL_RECURSION_LIMIT → KERNEL_VERSION(6,14,0)"
+          # Stable 6.18.y backported two mainline changes early:
+          # - ipv6_fl_list moved from ipv6_pinfo to inet_sock (mainline 6.19)
+          # - proto->recvmsg dropped addr_len 5-arg -> 4-arg (mainline 7.1)
+          # lxin/quic guards for 6.19 / 7.1, so it picks the old layout on
+          # 6.18.52 (HAOS 18.3) and fails. Feature-detect the actual kernel
+          # headers and force the new path when present (version-agnostic,
+          # keeps old kernels working).
+          if grep -q "ipv6_fl_list" "${LINUX_SRC}/include/net/inet_sock.h"; then
+            sed -i 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)/#if 1/' \
+              "${LINUX_SRC}/net/quic/socket.c"
+            echo "[INFO] Patched net/quic/socket.c: force inet_sock.ipv6_fl_list path (6.18 stable backport)"
+          fi
+          if ! grep -F -A3 '(*recvmsg)' "${LINUX_SRC}/include/net/sock.h" | grep -q "addr_len"; then
+            sed -i 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)/#if 1/' \
+              "${LINUX_SRC}/net/quic/socket.c"
+            echo "[INFO] Patched net/quic/socket.c: force 4-arg recvmsg path (6.18 stable backport)"
+          fi
 
           grep -qE '^obj-\$\(CONFIG_IP_QUIC\)' "${LINUX_SRC}/net/Makefile" || \
             echo 'obj-$(CONFIG_IP_QUIC) += quic/' >> "${LINUX_SRC}/net/Makefile"
@@ -978,6 +987,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          python3 -c "import packaging" 2>/dev/null || pip install --quiet packaging
           VERSION="${{ matrix.version }}"
 
           # Fetch the tag of the latest stable (non-prerelease) release in this repo.
@@ -992,8 +1002,9 @@ jobs:
             # No prior stable release – this is effectively the first; mark as latest.
             echo "make_latest=true" >> "$GITHUB_OUTPUT"
           else
-            # Use version-aware sort: if VERSION is the highest, it is >= LATEST_TAG.
-            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" | sort -V | tail -1)
+            # Use PEP 440 version-aware ordering: 18.3 > 18.3.rc2.
+            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" \\
+              | python3 -c "import sys; from packaging.version import Version; print(sorted(sys.stdin, key=lambda x: Version(x.strip()))[-1].strip())")
             if [[ "${HIGHEST}" == "${VERSION}" ]]; then
               echo "make_latest=true" >> "$GITHUB_OUTPUT"
             else

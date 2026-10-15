@@ -33,6 +33,16 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+try:
+    from packaging.version import Version
+except ImportError as _imp_err:
+    print(
+        "[ERROR] The 'packaging' module is required. "
+        "Install dependencies with: pip install -r requirements.txt",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from _imp_err
+
 GITHUB_API = "https://api.github.com"
 DEFAULT_HAOS_REPO = "home-assistant/operating-system"
 DEFAULT_THIS_REPO = "dianlight/hasos_more_modules"
@@ -82,11 +92,15 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=365 * 1)
 
-    # Determine latest stable release timestamp for prerelease filtering.
+    # Determine latest stable release (by publish date) for prerelease filtering.
+    # Keep both its publishing timestamp and its PEP 440 version so the filter
+    # can reason about ordering by version as well as by release date.
     latest_stable_published: datetime | None = None
+    latest_stable_tag: str | None = None
     for release in releases:
         if release.get("draft") or release.get("prerelease"):
             continue
+        tag = release.get("tag_name", "")
         published_at = release.get("published_at")
         if not published_at:
             continue
@@ -94,9 +108,10 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
             latest_stable_published = datetime.fromisoformat(
                 published_at.replace("Z", "+00:00")
             )
-            break
         except ValueError:
             continue
+        latest_stable_tag = tag
+        break
 
     filtered_tags: list[str] = []
     for release in releases:
@@ -117,13 +132,22 @@ def fetch_haos_tags(haos_repo: str, token: str | None) -> list[str]:
         if published_dt < cutoff:
             continue
 
-        # Keep pre-releases only if they are newer than the latest stable release.
+        # Keep pre-releases only if they are newer than the latest stable
+        # release both chronologically AND by PEP 440 version. This is what
+        # guarantees a release candidate (e.g. 18.3.rc2) is never treated as
+        # newer than its own stable (18.3), regardless of the publishing
+        # timestamps reported by GitHub.
         if release.get("prerelease") and latest_stable_published:
             if published_dt <= latest_stable_published:
+                continue
+            if latest_stable_tag is not None and tag and Version(tag) <= Version(latest_stable_tag):
                 continue
 
         filtered_tags.append(tag)
 
+    # Return newest first by PEP 440 ordering so callers consistently see
+    # 18.3, 18.3.rc10, 18.3.rc2, 18.2, ... (never an rc above its final).
+    filtered_tags.sort(key=lambda t: Version(t), reverse=True)
     return filtered_tags
 
 
