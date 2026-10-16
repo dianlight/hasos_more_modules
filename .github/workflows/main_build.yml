@@ -1003,7 +1003,7 @@ jobs:
             echo "make_latest=true" >> "$GITHUB_OUTPUT"
           else
             # Use PEP 440 version-aware ordering: 18.3 > 18.3.rc2.
-            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" \\
+            HIGHEST=$(printf '%s\n%s\n' "${VERSION}" "${LATEST_TAG}" \
               | python3 -c "import sys; from packaging.version import Version; print(sorted(sys.stdin, key=lambda x: Version(x.strip()))[-1].strip())")
             if [[ "${HIGHEST}" == "${VERSION}" ]]; then
               echo "make_latest=true" >> "$GITHUB_OUTPUT"
