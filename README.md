@@ -114,6 +114,24 @@ The workflow runs:
 - **Manually** from the *Actions* tab of the repository.
 - **Via API** with a `repository_dispatch` event of type `build-modules`.
 
+### Build planning: what is skipped and what is reshipped
+
+Before anything is compiled, `scripts/modules_config.py plan-status` compares
+every configured module against the kernel config HAOS itself builds
+(`${LINUX_SRC}/.config`, produced by `make linux-configure`). A module is only
+built when the official distribution does not already provide it:
+
+| Status | Meaning |
+|:-------|:--------|
+| ✅ Built | The module is not part of the HAOS kernel: it is compiled here. |
+| ♻️ Reshipped | HAOS ships the module as a `.ko`, but with a different config (for example `nfsd` without `CONFIG_NFSD_V4`): it is rebuilt with the requested config and re-shipped. The release table notes the exact difference. |
+| ⏭️ Skipped | The module is already available in the official distribution – built into the kernel (`=y`) or shipped as a `.ko` (`=m`). Nothing is compiled and nothing is shipped. |
+| ⚪ Excluded | The board is listed in `exclude_boards` in `config/modules.json`. |
+
+Every build job writes this plan to its workflow run summary, and the release
+body repeats it as a module × board matrix, so it is visible which modules came
+from this repository and which are already provided by HAOS.
+
 ---
 
 ## Installing modules on HAOS (Unsupported)

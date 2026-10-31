@@ -18,7 +18,8 @@
       "configs": [
         {
           "symbol": "CONFIG_XFS_FS",
-          "value": "m"
+          "value": "m",
+          "primary": true
         }
       ]
     },
@@ -29,7 +30,8 @@
       "configs": [
         {
           "symbol": "CONFIG_NFSD",
-          "value": "m"
+          "value": "m",
+          "primary": true
         },
         {
           "symbol": "CONFIG_NFSD_V4",
@@ -48,7 +50,8 @@
       "configs": [
         {
           "symbol": "CONFIG_NFS_FS",
-          "value": "m"
+          "value": "m",
+          "primary": true
         }
       ]
     },
@@ -57,10 +60,14 @@
       "artifact": "quic.ko",
       "description": "QUIC: A UDP-Based Multiplexed and Secure Transport (RFC 9000) – from lxin/quic",
       "requires_patch": true,
+      "native_paths": [
+        "net/quic/Kconfig"
+      ],
       "configs": [
         {
           "symbol": "CONFIG_IP_QUIC",
-          "value": "m"
+          "value": "m",
+          "primary": true
         }
       ]
     },
@@ -69,6 +76,9 @@
       "artifact": "zfs.ko",
       "description": "ZFS filesystem support – from openzfs/zfs",
       "requires_patch": true,
+      "native_paths": [
+        "fs/zfs/Kconfig"
+      ],
       "exclude_boards": [
         "rpi3_64",
         "rpi4_64",
@@ -79,7 +89,8 @@
       "configs": [
         {
           "symbol": "CONFIG_ZFS",
-          "value": "m"
+          "value": "m",
+          "primary": true
         }
       ]
     }

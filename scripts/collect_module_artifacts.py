@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from modules_config import artifact_names, load_config
+from modules_config import load_config, requested_artifact_names
 
 
 @dataclass
@@ -136,18 +136,26 @@ def parse_args() -> argparse.Namespace:
         default="config/modules.json",
         help="Path to modules.json",
     )
+    parser.add_argument(
+        "--only-modules",
+        default=None,
+        help="Comma-separated module names to package (default: all configured modules)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     data = load_config(Path(args.config))
-    requested_artifacts = artifact_names(data, args.board)
+    only_modules: list[str] | None = None
+    if args.only_modules:
+        only_modules = [m.strip() for m in args.only_modules.split(",") if m.strip()]
+    requested_artifacts = requested_artifact_names(data, args.board, only_modules)
     if not requested_artifacts:
         print(
-            "[ERROR] No top-level modules found in config/modules.json", file=sys.stderr
+            "[WARN] No modules selected for packaging for this board.", file=sys.stderr
         )
-        return 1
+        return 0
 
     linux_src = Path(args.linux_src)
     output_dir = Path(args.output_dir)

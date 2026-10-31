@@ -255,27 +255,6 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Checkout lxin/quic (out-of-tree QUIC kernel module)
-        if: steps.precheck.outputs.should_build == 'true'
-        uses: actions/checkout@v7.0.1
-        with:
-          repository: lxin/quic
-          # renovate: datasource=git-refs packageName=https://github.com/lxin/quic
-          ref: 9bb938eb261d66fa6c83695426331a9e5e26b21d
-          path: lxin-quic
-          fetch-depth: 1
-
-      - name: Checkout openzfs/zfs (out-of-tree ZFS kernel module)
-        # Skip checkout for boards that always exclude ZFS (saves ~600 MB clone time).
-        if: steps.precheck.outputs.should_build == 'true' && !contains(fromJson('["rpi3_64","rpi4_64","rpi5_64","yellow"]'), matrix.board)
-        uses: actions/checkout@v7.0.1
-        with:
-          repository: openzfs/zfs
-          # renovate: datasource=github-releases packageName=openzfs/zfs
-          ref: zfs-2.3.6
-          path: openzfs-zfs
-          fetch-depth: 1
-
       # Buildroot needs a set of host packages.
       - name: Install host build dependencies
         if: steps.precheck.outputs.should_build == 'true'
@@ -472,38 +451,60 @@ jobs:
           fi
 
       # ─────────────────────────────────────────────────────────────────────
-      # Phase 1: Build base modules (no kernel source patching required)
+      # Decide what actually needs compiling.  ${LINUX_SRC}/.config is the
+      # exact config HAOS builds this board's kernel with, so a module that is
+      # already =m there is shipped as a .ko in the HAOS image and one that is
+      # =y is built into vmlinux: neither needs to be rebuilt.  A module that
+      # is present but whose config differs has to be reshipped.
       # ─────────────────────────────────────────────────────────────────────
-      - name: Build base modules (xfs, nfsd, nfs)
+      - name: Plan module build status
+        id: plan
         if: steps.precheck.outputs.should_build == 'true'
         env:
-          ARCH: ${{ steps.arch.outputs.ARCH }}
-          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
+          BOARD: ${{ matrix.board }}
+          VERSION: ${{ matrix.version }}
         run: |
           set -euo pipefail
 
-          # Snapshot all CONFIG symbols that are already =m in the HAOS merged
-          # config.  These will be promoted to =y so 'make modules' only builds
-          # our explicitly added modules.
+          python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            --board "${BOARD}" \
+            plan-status \
+            --kernel-config "${LINUX_SRC}/.config" \
+            --linux-src "${LINUX_SRC}" \
+            --version "${VERSION}" \
+            --json-out plan_status.json \
+            --summary-out "${GITHUB_STEP_SUMMARY}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+          PLANNED=$(python3 -c "import json;print(','.join(json.load(open('plan_status.json'))['build']))")
+          echo "[INFO] Modules to build: '${PLANNED}'"
+          if [[ -z "${PLANNED}" ]]; then
+            echo "[INFO] Nothing to compile for ${VERSION}/${BOARD} – every requested"
+            echo "[INFO] module is already provided by the official HAOS distribution."
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 'make modules' builds every symbol that is =m, which for a HAOS kernel
+      # is the whole distribution module set.  Promote the HAOS-native ones to
+      # =y (then skipped by 'make modules') so only the modules selected by the
+      # plan above are compiled.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Leave HAOS-native modules out of the build
+        if: steps.precheck.outputs.should_build == 'true' && steps.plan.outputs.build_modules != ''
+        run: |
+          set -euo pipefail
+
           HAOS_M_SYMS=$(grep -E '^[A-Z0-9_]+=m$' "${LINUX_SRC}/.config" \
                           | cut -d= -f1 || true)
           HAOS_M_COUNT=$(echo "${HAOS_M_SYMS}" | grep -c . || true)
           echo "[INFO] ${HAOS_M_COUNT} CONFIG symbols are =m in the HAOS base kernel."
 
-          # Patch config for base (non-patched) modules only.
-          BASE_MODS=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
-            --board "${{ matrix.board }}" base-module-names | paste -sd, -)
-          echo "[INFO] Patching config for base modules: ${BASE_MODS}"
-          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" \
-            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" --only-modules "${BASE_MODS}"
-
-          # Determine ALL target =m symbols (base + patched) so promotion
-          # preserves patched module symbols for later steps.
+          # Symbols of the modules we are about to build stay =m.
           ALL_TARGET_M_SYMS=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
             --board "${{ matrix.board }}" config-assignments-json \
+            --only-modules "${{ steps.plan.outputs.build_modules }}" \
             | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(e['symbol'] for e in d if e['value']=='m'))")
 
-          # Promote pre-existing =m symbols to =y, preserving all our targets.
           PROMOTED=0
           KEPT=0
           for sym in ${HAOS_M_SYMS}; do
@@ -519,6 +520,44 @@ jobs:
           done
           echo "[INFO] Promoted ${PROMOTED} HAOS-native =m modules to =y."
           echo "[INFO] Kept     ${KEPT} symbols as =m (our build targets)."
+
+      - name: Checkout lxin/quic (out-of-tree QUIC kernel module)
+        if: steps.precheck.outputs.should_build == 'true' && steps.plan.outputs.need_quic == 'true'
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: lxin/quic
+          # renovate: datasource=git-refs packageName=https://github.com/lxin/quic
+          ref: 9bb938eb261d66fa6c83695426331a9e5e26b21d
+          path: lxin-quic
+          fetch-depth: 1
+
+      - name: Checkout openzfs/zfs (out-of-tree ZFS kernel module)
+        if: steps.precheck.outputs.should_build == 'true' && steps.plan.outputs.need_zfs == 'true'
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: openzfs/zfs
+          # renovate: datasource=github-releases packageName=openzfs/zfs
+          ref: zfs-2.3.6
+          path: openzfs-zfs
+          fetch-depth: 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Phase 1: Build base modules (no kernel source patching required)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build base modules requested by the plan
+        if: steps.precheck.outputs.should_build == 'true' && steps.plan.outputs.base_build != ''
+        env:
+          ARCH: ${{ steps.arch.outputs.ARCH }}
+          CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
+        run: |
+          set -euo pipefail
+
+          # Patch config for base (non-patched) modules only.
+          BASE_MODS="${{ steps.plan.outputs.base_build }}"
+          echo "[INFO] Patching config for base modules: ${BASE_MODS}"
+          bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" \
+            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" \
+            --only-modules "${BASE_MODS}" --force
 
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
@@ -558,28 +597,13 @@ jobs:
       # ─────────────────────────────────────────────────────────────────────
       - name: Integrate and build quic module
         id: build-quic
-        if: steps.precheck.outputs.should_build == 'true'
+        if: steps.precheck.outputs.should_build == 'true' && steps.plan.outputs.need_quic == 'true'
         continue-on-error: true
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
           CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
         run: |
           set -euo pipefail
-
-          # Check if quic is in the patched module list for this board.
-          QUIC_ENABLED=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
-            --board "${{ matrix.board }}" patched-module-names-json \
-            | python3 -c "import sys,json; names=json.load(sys.stdin); print('true' if 'quic' in names else 'false')")
-          if [[ "${QUIC_ENABLED}" == "false" ]]; then
-            echo "[INFO] quic not configured for board '${{ matrix.board }}', skipping."
-            exit 0
-          fi
-
-          # Skip if QUIC is already native in this kernel.
-          if [[ -f "${LINUX_SRC}/net/quic/Kconfig" ]]; then
-            echo "[INFO] net/quic/Kconfig already present – QUIC is native. Skipping."
-            exit 0
-          fi
 
           echo "[INFO] Integrating QUIC out-of-tree module from lxin/quic ..."
           QUIC_MODULES_SRC="${GITHUB_WORKSPACE}/lxin-quic/modules"
@@ -614,7 +638,8 @@ jobs:
           echo "[INFO] QUIC source integrated. Patching config and building ..."
 
           bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" \
-            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" --only-modules quic
+            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" \
+            --only-modules quic --force
 
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
@@ -648,28 +673,13 @@ jobs:
 
       - name: Integrate and build zfs module
         id: build-zfs
-        if: steps.precheck.outputs.should_build == 'true'
+        if: steps.precheck.outputs.should_build == 'true' && steps.plan.outputs.need_zfs == 'true'
         continue-on-error: true
         env:
           ARCH: ${{ steps.arch.outputs.ARCH }}
           CROSS_COMPILE: ${{ steps.arch.outputs.CROSS_COMPILE }}
         run: |
           set -euo pipefail
-
-          # Check if zfs is in the patched module list for this board.
-          ZFS_ENABLED=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
-            --board "${{ matrix.board }}" patched-module-names-json \
-            | python3 -c "import sys,json; names=json.load(sys.stdin); print('true' if 'zfs' in names else 'false')")
-          if [[ "${ZFS_ENABLED}" == "false" ]]; then
-            echo "[INFO] zfs not configured for board '${{ matrix.board }}', skipping."
-            exit 0
-          fi
-
-          # Skip if ZFS is already native in this kernel.
-          if [[ -f "${LINUX_SRC}/fs/zfs/Kconfig" ]]; then
-            echo "[INFO] fs/zfs/Kconfig already present – ZFS is native. Skipping."
-            exit 0
-          fi
 
           # Resolve Buildroot cross-compiler for ZFS build.
           OS_DIR="${GITHUB_WORKSPACE}/operating-system"
@@ -736,7 +746,8 @@ jobs:
           cd "${GITHUB_WORKSPACE}"
 
           bash "${GITHUB_WORKSPACE}/scripts/patch_config.sh" \
-            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" --only-modules zfs
+            "${LINUX_SRC}/.config" "${{ matrix.board }}" "" \
+            --only-modules zfs --force
 
           make -C "${LINUX_SRC}" \
             ARCH="${ARCH}" \
@@ -778,29 +789,21 @@ jobs:
 
           echo "[INFO] Patched module outcomes: quic=${QUIC_OUTCOME}, zfs=${ZFS_OUTCOME}"
 
-          python3 -c "
-          import json
-          failed = {}
-          if '${QUIC_OUTCOME}' == 'failure':
-              failed['quic'] = '${BOARD}'
-          if '${ZFS_OUTCOME}' == 'failure':
-              failed['zfs'] = '${BOARD}'
-          manifest = {
-              'board': '${BOARD}',
-              'version': '${VERSION}',
-              'failed': failed,
-          }
-          print(json.dumps(manifest, indent=2))
-          with open('${OUT_DIR}/build_manifest_${BOARD}.json', 'w') as f:
-              json.dump(manifest, f, indent=2)
-          "
+          python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            write-manifest \
+            --plan plan_status.json \
+            --version "${VERSION}" \
+            --board "${BOARD}" \
+            --quic-outcome "${QUIC_OUTCOME}" \
+            --zfs-outcome "${ZFS_OUTCOME}" \
+            --output "${OUT_DIR}/build_manifest_${BOARD}.json"
 
       # ─────────────────────────────────────────────────────────────────────
       # Artifact collection
       # ─────────────────────────────────────────────────────────────────────
 
       - name: Extract and rename .ko files
-        if: steps.precheck.outputs.should_build == 'true'
+        if: steps.precheck.outputs.should_build == 'true' && steps.plan.outputs.build_modules != ''
         run: |
           VERSION="${{ matrix.version }}"
           BOARD="${{ matrix.board }}"
@@ -809,7 +812,8 @@ jobs:
             --linux-src "${LINUX_SRC}" \
             --board "${BOARD}" \
             --version "${VERSION}" \
-            --output-dir "${OUT_DIR}"
+            --output-dir "${OUT_DIR}" \
+            --only-modules "${{ steps.plan.outputs.build_modules }}"
 
       - name: Fail if no modules were produced
         if: steps.precheck.outputs.should_build == 'true'
@@ -818,29 +822,19 @@ jobs:
           BOARD="${{ matrix.board }}"
           OUT_DIR="output_modules/${VERSION}/${BOARD}"
 
-          COUNT=$(find "${OUT_DIR}" -maxdepth 1 -type f -name '*.ko' | wc -l)
+          COUNT=$(find "${OUT_DIR}" -maxdepth 1 -type f -name '*.ko' 2>/dev/null | wc -l)
           if [[ "${COUNT}" -eq 0 ]]; then
-            # Check if ALL our target modules were already =m in the HAOS kernel
-            # (i.e., promoted to =y by the build step and therefore not compiled).
-            TARGET_M=$(python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
-              --board "${BOARD}" config-assignments-json \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(e['symbol'] for e in d if e['value']=='m'))")
-            ALL_NATIVE=true
-            for sym in ${TARGET_M}; do
-              if grep -q "^${sym}=y$" "${LINUX_SRC}/.config" 2>/dev/null; then
-                echo "[INFO] ${sym} was already native in HAOS kernel (=y after promotion)."
-              else
-                ALL_NATIVE=false
-              fi
-            done
-
-            if [[ "${ALL_NATIVE}" == "true" ]]; then
-              echo "[INFO] All target modules for ${VERSION}/${BOARD} are already"
-              echo "[INFO] built into the official HAOS kernel.  Nothing new to ship."
+            # The plan already established what has to be compiled.  Nothing to
+            # ship is only acceptable when every requested module is provided
+            # by the official distribution for this board.
+            if [[ "${{ steps.plan.outputs.all_skipped }}" == "true" ]]; then
+              echo "[INFO] All requested modules for ${VERSION}/${BOARD} are"
+              echo "[INFO] already provided by the official HAOS distribution."
               exit 0
             fi
 
-            echo "[ERROR] No .ko modules were produced for ${VERSION}/${BOARD}."
+            echo "[ERROR] No .ko modules were produced for ${VERSION}/${BOARD}"
+            echo "[ERROR] although the plan requested: ${{ steps.plan.outputs.build_modules }}"
             exit 1
           fi
 
@@ -951,6 +945,7 @@ jobs:
           MANIFESTS=$(find release-assets -name 'build_manifest_*.json' 2>/dev/null || true)
           if [[ -z "${MANIFESTS}" ]]; then
             echo "[INFO] No build manifests found – assuming all modules built OK."
+            echo '{}' > module_statuses.json
             echo "failed_json={}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -958,7 +953,12 @@ jobs:
           # Aggregate: merge per-board failures into { module: [board1, board2, ...] }
           FAILED_JSON=$(python3 "${GITHUB_WORKSPACE}/scripts/check_releases.py" aggregate-manifests ${MANIFESTS})
 
+          # Aggregate: merge per-board statuses into { module: { board: {...} } }
+          python3 "${GITHUB_WORKSPACE}/scripts/modules_config.py" \
+            aggregate-statuses ${MANIFESTS} > module_statuses.json
+
           echo "[INFO] Failed modules across boards: ${FAILED_JSON}"
+          cat module_statuses.json
           echo "failed_json=${FAILED_JSON}" >> "$GITHUB_OUTPUT"
 
       - name: Render release body from config/modules.json
@@ -966,20 +966,24 @@ jobs:
         run: |
           BOARDS_JSON='${{ needs.detect-boards.outputs.boards }}'
           FAILED_JSON='${{ steps.aggregate-manifests.outputs.failed_json }}'
+
+          ARGS=(
+            release-body
+            --version "${{ matrix.version }}"
+            --output release-body.md
+            --boards-json "${BOARDS_JSON}"
+          )
           if [[ -n "${FAILED_JSON}" && "${FAILED_JSON}" != "{}" ]]; then
-            python3 scripts/modules_config.py \
-              release-body \
-              --version "${{ matrix.version }}" \
-              --output release-body.md \
-              --boards-json "${BOARDS_JSON}" \
-              --failed-modules-json "${FAILED_JSON}"
-          else
-            python3 scripts/modules_config.py \
-              release-body \
-              --version "${{ matrix.version }}" \
-              --output release-body.md \
-              --boards-json "${BOARDS_JSON}"
+            ARGS+=(--failed-modules-json "${FAILED_JSON}")
           fi
+          if [[ -s module_statuses.json && "$(cat module_statuses.json)" != "{}" ]]; then
+            ARGS+=(--statuses-json "$(cat module_statuses.json)")
+          fi
+
+          python3 scripts/modules_config.py "${ARGS[@]}"
+
+          # Publish the same table in the workflow run summary.
+          cat release-body.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Determine make_latest flag
         id: make-latest

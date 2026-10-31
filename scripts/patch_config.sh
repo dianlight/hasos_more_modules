@@ -14,6 +14,11 @@
 #                             Optional; defaults to config/modules.json.
 #   --only-modules <list>     Comma-separated module names to apply configs for.
 #                             Optional; defaults to all modules.
+#   --force                   Apply the requested value even when the config
+#                             already sets a different one.  Upgrades only
+#                             (n/f → m/y, m → y); a `=y` is never demoted to
+#                             `=m`, since a built-in module cannot be replaced
+#                             by a loadable one.
 #
 # The script loads CONFIG_* assignments from config/modules.json and applies
 # them to the selected kernel.config file.
@@ -38,11 +43,16 @@ MODULES_CONFIG="${3:-${REPO_ROOT}/config/modules.json}"
 # Parse optional flags after positional args
 shift; shift 2>/dev/null || true; shift 2>/dev/null || true
 ONLY_MODULES=""
+FORCE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --only-modules)
             ONLY_MODULES="$2"
             shift 2
+            ;;
+        --force)
+            FORCE=1
+            shift
             ;;
         *)
             echo "[WARN] Unknown argument: $1" >&2
@@ -80,15 +90,31 @@ sed_inplace() {
     fi
 }
 
-# set_config_value <symbol> <value>
-#   Ensures <symbol>=<value> is present; only replaces existing values if
-#   they are disabled (n/f).
+# set_config_value <symbol> <value> [<force>]
+#   Ensures <symbol>=<value> is present.  Without <force>, an existing value is
+#   only replaced when it is disabled (n/f).  With <force>, the requested value
+#   wins, except for a `=y` → `=m` demotion, which is refused because a module
+#   built into vmlinux cannot be replaced by a loadable one.
 set_config_value() {
     local sym="$1"
     local val="$2"
+    local force="${3:-0}"
     if grep -qE "^${sym}=" "${CONFIG_FILE}"; then
         local current_value
         current_value=$(grep -E "^${sym}=" "${CONFIG_FILE}" | head -n1 | cut -d'=' -f2-)
+
+        if [[ "${current_value}" == "${val}" ]]; then
+            return 0
+        fi
+
+        if [[ "${force}" -eq 1 ]]; then
+            if [[ "${current_value}" == "y" && "${val}" == "m" ]]; then
+                echo "  [warn] ${sym} is built-in (=y); keeping it instead of =m"
+                return 0
+            fi
+            sed_inplace "s|^${sym}=.*|${sym}=${val}|" "${CONFIG_FILE}"
+            return 0
+        fi
 
         if [[ "${current_value}" == "n" || "${current_value}" == "f" ]]; then
             sed_inplace "s|^${sym}=.*|${sym}=${val}|" "${CONFIG_FILE}"
@@ -127,7 +153,7 @@ for entry in "${ASSIGNMENTS[@]}"; do
         rendered_value="${value}"
     fi
     echo "  [set] ${sym}=${rendered_value}"
-    set_config_value "${sym}" "${rendered_value}"
+    set_config_value "${sym}" "${rendered_value}" "${FORCE}"
     PATCHED_SYMBOLS+=("${sym}")
 done
 
