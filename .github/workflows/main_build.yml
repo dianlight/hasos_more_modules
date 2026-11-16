@@ -143,6 +143,9 @@ jobs:
     outputs:
       versions: ${{ steps.detect.outputs.versions }}
       has_versions: ${{ steps.detect.outputs.has_versions }}
+      # Subset of `versions` that must be built on ubuntu-24.04 (see the
+      # LEGACY_RUNNER_CUTOFF comment in "Detect versions to build").
+      legacy_versions: ${{ steps.detect.outputs.legacy_versions }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -189,6 +192,7 @@ jobs:
           if [[ -z "${VERSIONS}" ]]; then
             echo "No new versions to build."
             echo "versions=[]"        >> "$GITHUB_OUTPUT"
+            echo "legacy_versions=[]" >> "$GITHUB_OUTPUT"
             echo "has_versions=false" >> "$GITHUB_OUTPUT"
           else
             # Limit to a maximum number of versions (default 5, configurable via MAX_VERSIONS).
@@ -202,6 +206,19 @@ jobs:
             echo "versions=${JSON}"      >> "$GITHUB_OUTPUT"
             echo "has_versions=true"     >> "$GITHUB_OUTPUT"
             echo "Versions to build: ${JSON}"
+
+            # HAOS < 17.2 pins a Buildroot revision whose host-m4 is 1.4.20.
+            # That m4 ships gnulib headers that do not compile with the GCC 15
+            # available on ubuntu-26.04 ("error: expected identifier or '('
+            # before '_Generic'" while building host-m4), which kills
+            # `make linux-configure` before any kernel work.  HAOS 17.2 bumped
+            # Buildroot's m4 to 1.4.21, so only older versions need the
+            # ubuntu-24.04 runner (GCC 13).
+            LEGACY_RUNNER_CUTOFF="17.2"
+            LEGACY=$(echo "${JSON}" \
+              | python3 -c "import sys, json; from packaging.version import Version; cutoff = Version('${LEGACY_RUNNER_CUTOFF}'); print(json.dumps([t for t in json.load(sys.stdin) if Version(t) < cutoff]))")
+            echo "legacy_versions=${LEGACY}" >> "$GITHUB_OUTPUT"
+            echo "Legacy versions (ubuntu-24.04): ${LEGACY}"
           fi
 
   # ---------------------------------------------------------------------------
@@ -211,7 +228,10 @@ jobs:
     name: Build ${{ matrix.version }} / ${{ matrix.board }}
     needs: [detect-boards, detect-versions]
     if: needs.detect-versions.outputs.has_versions == 'true'
-    runs-on: ubuntu-26.04
+    # Versions older than HAOS 17.2 fail to configure their kernel on
+    # ubuntu-26.04 (host-m4 1.4.20 vs GCC 15), so they are built on
+    # ubuntu-24.04; detect-versions computes the affected subset.
+    runs-on: ${{ contains(fromJson(needs.detect-versions.outputs.legacy_versions), matrix.version) && 'ubuntu-24.04' || 'ubuntu-26.04' }}
     permissions:
       contents: read
     strategy:
